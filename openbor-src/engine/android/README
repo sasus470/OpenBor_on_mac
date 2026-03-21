@@ -1,0 +1,110 @@
+##############################################
+# Msmalik681 Windows 64 bit Build instructions
+##############################################
+
+First Download and install JAVA JDK 11. once installed open a command promt window and type "java -version" if it confirms you have java 11 installed.
+
+Now download the Android SDK but be sure to get the "command line tools only" package and extract it to the folder "C:\android\sdk\" if this path is missing make it. Now confirm your have this path "C:\android\sdk\cmdline-tools\bin\sdkmanager.bat" if you have a match your done with this step.
+
+Finally go to the android folder in the source code and run build.bat. If it is the first time it will take time to download everything.
+
+############################################
+# Msmalik681 Linux 64 bit Build instructions
+############################################
+
+make sure you have java 11 installed check in terminal with "java --version" you can use openjdk 11.
+
+(Optional) Download Android SDK but be sure to get the "command line tools only" and extract to "~/.android" now youo should have the path "~/.android/cmdline-tools/sdkmanager".
+
+Finally go to the android folder in the source code and run ./build.sh it will take a time to download everything if this is the first run.
+
+#########################
+# Custom Apk instructions
+#########################
+
+First ensure you can view file extensions to do this open a file browser window then select "view->options->change folder and search options" next select the tab view then uncheck "hide extensions for known file types" I also like to set "Show hidden files, folders and drives" (but that has nothing to do with the tutorial).
+
+If you have a keystore file skip this step. To make a keystore key using the "make.my.key.bat" (found in the root of the openbor android folder) first right click and edit the .bat file to modify the "alias_name" to your preferred alias then save and run. Complete all the details within the command prompt window keeping note of the passwords (they can be different but I like to keep them the same) and the alias. finally you will get a output file "my-key.jks" in the same directory keep this file safe as you will need it to sign your apks.
+
+Next open the file "app/build.gradle" and modify the "MODIFY FOR CUSTOM APK" and the edit the fields to match your games details. to sign your app make a new text file named "keystore.properties" then open it with notepad (or your favorite text editor I recommend notepad++) and copy and paste this template:
+
+storePassword=password
+keyPassword=password
+keyAlias=alias_name
+storeFile=../my-key.jks
+
+edit the fields to match your "my-key.jks" file and save. 2 things to note do not use quotes when completing these fields and second the default directory is the "android/app/" directory so in this example for "storeFile=../my-key.jks" your keystore file is located in the root android directory I recommend to copy your keystore file there to keep things simple. If you want to point to another file location it has to be relative to the apps directory you can not just copy the full path to your keystore file.
+
+Copy your pak file to the folder "app\src\main\assets\bor.pak" and it should be less then 100mb if you want to publish to play store.
+
+Now edit the "build.bat" file and make sure it is set to " cmd /k "gradlew.bat clean & gradlew.bat assembleRelease" " ignoring the outer quotes I used here. Run build.bat and if completed successfully your apk will be at "app/build/outputs/apk/release/app-release.apk" your can rename the apk if you want to and now your ready to upload your app.
+
+###################################################
+# Custom Apk instructions (for Release build only)
+###################################################
+
+* First make a keystore key using the "make-my-key.bat" for Windows (for Linux/Unix, execute "make-my-key.sh") first right click and edit the .bat file to modify the "alias_name" to your preferred alias then run. Complete all the details keeping note of the passwords they can be different but I like to keep them the same. Finally you will get an output file "my-key.jks" in the same directory. Keep this file safe as you will need it to sign your apks.
+* Create `keystore.properties` file at the root of android build directory at `android/` with the following content filled with your information of store/key passwords, keyalias, and store file path from previous step.
+
+storePassword=<storePassword>
+keyPassword=<keyPassword>
+keyAlias=alias_name
+storeFile=../my-key.jks
+
+If you create your keystore with another name of keyAlias, then you need to update "alias_name" above to match what you have. The same goes for "storeFile=" if you put your keystore file to elsewhere.
+
+* (optional) If you put "my-key.jks" to somewhere else, make sure to edit `keystore.properties` file for its `storeFile=` to point to such file path. See the comment in `keystore.properties` for more information.
+* For Windows, now edit the "build.bat" file and make sure it is set to " cmd /k "gradlew.bat clean & gradlew.bat assembleRelease" " ignoring the outer quotes I used here. Run build.bat and if completed successfully your apk will be at "app/build/outputs/apk/release/app-release.apk" your can rename the apk if you want to and now your ready to upload your app. For Linux/Unix, just execute "./gradlew assembleRelease", and you will see the result .apk at the same location.
+
+################################
+# Detail on Android Gradle Build
+################################
+
+This gradle build system provides with you ability to build OpenBOR then install it on your Android device.
+
+There are 2 approaches when building for Android
+
+1. build OpenBOR as an app that allows you to add more mods and you can choose from the list to play
+2. build commercial title, or standalone game with a dedicated .pak file to work with
+
+For 1, you have to make sure your package name as configured in `app/build.gradle` and `app/src/main/AndroidManifest.xml` in total of 3 places as seen in source file are literally and exactly "org.openbor.engine". By default, Android build system is configured to be like this.
+
+For 2, you can name your package name freely. Normally will be your domain name + app name ie. "com.mycompany.gamename". This is an approach you should use if you aim to publish your game in the market so OpenBOR will strictly work with your .pak file only.
+
+#####################
+# Sideload more mods
+####################
+
+In case you want to install mods in order to play the game, you have to sideload by putting your `.pak` files on to external storage `OpenBOR/Paks/` locating on Android device. This will work with OpenBOR built as general purpose (see 1. above).
+
+The location to put your .pak file is likely to be at /storage/sdcard0/OpenBOR/Paks. You can use adb to upload the file to your android device by executing `adb push /path/to/your.pak /storage/sdcard0/OpenBOR/Paks/`.
+
+###################################
+# Android development with OpenBOR
+###################################
+
+There are a couple of things to note when develop your game with OpenBOR on Android.
+
+* put your .pak file at `app/src/main/res/raw`, and rename your .pak file as `bor.png`. This has to do with compression which will be done by Android's tools behind the scene. We use .png extension to avoid further compression again. See http://ponystyle.com/blog/2010/03/26/dealing-with-asset-compression-in-android-apps/ for more related information.
+* .apk file size limit. For Android's Play Store, it limits to 100 MB but allows up to 4 GB via expansion files (obb). See below.
+
+############################
+## 100 MB assets limitation
+############################
+
+Android limits the maximum size of assets that can be embedded into a single .apk file at 100 MB.
+Most likely if your game's assets are quite big, it will get pass through such limit i.e. World Heroes Timeless (https://github.com/DCurrent/World-Heroes-Timeless) .pak file is at 72 MB mark.
+
+During development, you have no worry about this file size limit. It will only be imposed when you planned to publish on Play Store, so you will have to spend some effort following their policy which will affect end-users downloading your app. See expansion files (obb) https://developer.android.com/google/play/expansion-files.html for further instruction on how to do this.
+
+Anyway for debugging and development, you can
+
+* normally put .pak file into `app/src/main/res/raw` directory (remember to rename it to bor.png). But you might have to increase gradle's heap memory to accommodate processing the file. Configure gradle's heap memory at `gradle.properties` at line `org.gradle.jvmargs=-Xmx1536m` (for example, change to 4GB, change it to `org.gradle.jvmargs=-Xmx4096m`)
+* build OpenBOR and install on device normally without .pak file. Manually place such file to device via any possible means at `Paks/` of your application. You might need to root your device doing this as it's visible to application not end-users. Also name your .pak file as <versionName>.pak in which <versionName> is `android:versionName` value as seen in `AndroidManifest.xml` located at `app/src/main/`.
+
+####################
+# Development Notes
+###################
+
+* Minimum SDK (API Level) is 16 at the moment
+* Support building for two architectures (with included pre-built libraries) arm64-v8a, and armeabi-v7a.
