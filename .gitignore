@@ -1,1 +1,16 @@
+.DS_Store
 
+# macOS app bundles and packaged builds
+build/
+*.app
+*.zip
+
+# Runtime data and generated caches
+*.sqlite
+*.log
+OpenBorLog.txt
+ScriptLog.txt
+*.cfg
+
+# Local editor / OS noise
+*.swp
