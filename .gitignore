@@ -14,5 +14,8 @@ ScriptLog.txt
 
 # Local editor / OS noise
 *.swp
+<<<<<<< HEAD
 
+=======
+>>>>>>> 19efdbc6ccaa5d03da9370c4f9b09047fc74dd38
 openbor-src/.git_backup/
