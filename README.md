@@ -62,6 +62,34 @@ build/frontend/OpenBOR Frontend Launcher.app
 - Covers are cached locally and stored in a local SQLite database
 - Imported covers are copied into the local `Covers` folder
 
+## Command Line Usage
+
+The frontend launcher also supports command-line usage for integrations and advanced workflows.
+
+Supported options:
+
+- `--pak <file>`
+- `--launch <file>`
+- `--paks-dir <dir>`
+- `--saves-dir <dir>`
+- `--logs-dir <dir>`
+- `--screenshots-dir <dir>`
+- `--engine-arg <arg>`
+- `--engine-args ...`
+- `--help`
+
+Examples:
+
+```bash
+./build/final/OpenBOR\ Frontend\ Launcher.app/Contents/MacOS/openbor-launch --pak "/path/to/game.pak"
+```
+
+```bash
+./build/final/OpenBOR\ Frontend\ Launcher.app/Contents/MacOS/openbor-launch --pak "/path/to/game.pak" --saves-dir "/path/to/saves"
+```
+
+If a single file path is passed directly, `openbor-launch` treats it as a `.pak` shortcut automatically.
+
 ## GitHub Releases
 
 Source code belongs in the repository.
