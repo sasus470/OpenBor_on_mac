@@ -646,7 +646,7 @@ final class AppModel: ObservableObject {
         return defaults.string(forKey: metalShaderDefaultsKey) ?? MetalShaderPreset.off.rawValue
     }
     
-    private static func printCLIHelp() {
+    static func printCLIHelp() {
         let help = """
         OpenBOR Frontend Launcher CLI
         
@@ -661,7 +661,7 @@ final class AppModel: ObservableObject {
           --engine-args ...         Forward all remaining arguments to OpenBOR
           --metal                   Launch OpenBOR with the experimental Metal backend
           --metal-shader <preset>   Metal shader preset: off, scanlines, crt-lite
-          --help                    Show this help
+          --help, -h                Show this help and exit
         """
         print(help)
     }

@@ -112,7 +112,7 @@ Built app packages such as:
 
 should be published through GitHub `Releases`, not committed into source control.
 
-Current validated launcher build: **V2.0, 20261002-1456**, macOS 14+ on Apple Silicon.
+Current validated launcher build: **V2.0, 20261002-1902**, macOS 14+ on Apple Silicon.
 See [release notes](docs/RELEASE_20261002.md). Historical development builds are
 archived separately and should not be confused with the current launcher.
 Games, user saves, logs and compilation caches are not distributed.
@@ -122,6 +122,8 @@ Prepare the current package and a cleaned historical archive locally with:
 ```bash
 python3 tools/prepare_release.py
 ```
+
+Use `--current-only` when publishing an update without rebuilding the historical archive.
 
 The generated packages and SHA-256 manifests are placed in `build/publish/`.
 

@@ -1,10 +1,13 @@
 """Package the validated launcher and historical ZIPs without personal/game data."""
+import argparse
 import hashlib
 import json
 import pathlib
 import plistlib
 import re
+import shutil
 import subprocess
+import tempfile
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -27,7 +30,7 @@ def digest(path):
     return result.hexdigest()
 
 
-def prepare():
+def prepare(current_only=False):
     dated = sorted(path for path in FINAL.glob("*.zip")
                    if re.fullmatch(r"OpenBOR Frontend Launcher \d{8}-\d{4}\.zip", path.name))
     if not dated:
@@ -46,11 +49,29 @@ def prepare():
     output = ROOT / "build/publish" / f"v{version}-{stamp}"
     output.mkdir(parents=True, exist_ok=True)
     current = output / f"OpenBOR-Frontend-Launcher-V{version}-{stamp}-macOS-arm64.zip"
-    subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(APP), str(current)], check=True)
+    # Package a clean copy: engine startup can create runtime directories in the bundle.
+    def ignore_runtime_data(directory, names):
+        return [name for name in names
+                if excluded((pathlib.Path(directory) / name).relative_to(APP).as_posix()
+                            + ("/" if (pathlib.Path(directory) / name).is_dir() else ""))]
+
+    with tempfile.TemporaryDirectory(prefix="release-stage-", dir=output) as staging:
+        staged_app = pathlib.Path(staging) / APP.name
+        shutil.copytree(APP, staged_app, symlinks=True, ignore=ignore_runtime_data)
+        subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(staged_app), str(current)], check=True)
     with zipfile.ZipFile(current) as archive:
         if any(excluded(name) for name in archive.namelist()):
             current.unlink()
             raise SystemExit("Current app contains game/runtime data; distribution refused")
+    if current_only:
+        checksum = digest(current)
+        manifest = {"current_build": stamp, "version": version,
+                    "packages": [{"file": current.name, "sha256": checksum}]}
+        (output / "release-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        (output / "SHA256SUMS.txt").write_text(f"{checksum}  {current.name}\n", encoding="ascii")
+        print(f"Current package: {current.name}")
+        print(f"Output: {output}")
+        return
     historical = [path for path in sorted(FINAL.glob("*.zip")) if path != latest]
     history = output / f"Historical-Launcher-Builds-through-{stamp}.zip"
     manifest = {"current_build": stamp, "version": version, "historical_count": len(historical), "builds": []}
@@ -76,4 +97,7 @@ def prepare():
 
 
 if __name__ == "__main__":
-    prepare()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--current-only", action="store_true",
+                        help="Prepare only the current release; leave historical archives unchanged")
+    prepare(current_only=parser.parse_args().current_only)

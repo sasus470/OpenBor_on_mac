@@ -99,10 +99,31 @@ typedef void DIR;
 #define COPY_ROOT_PATH(buf, name) strncpy(buf, rootDir, strlen(rootDir)); strncat(buf, name, strlen(name)); strncat(buf, "/", 1);
 #define COPY_PAKS_PATH(buf, name) strncpy(buf, paksDir, strlen(paksDir)); strncat(buf, "/", 1); strncat(buf, name, strlen(name));
 #else
+#if defined(SDL) && defined(DARWIN)
+static const char *configuredLogPath(int type)
+{
+    static char path[MAX_FILENAME_LEN + 32];
+    /* Logging can start before SDL applies the environment overrides. */
+    const char *directory = getenv("OPENBOR_LOGS_DIR");
+    if(!directory || !directory[0])
+    {
+        directory = logsDir;
+    }
+    snprintf(path, sizeof(path), "%s%s%s", directory,
+             directory[0] && directory[strlen(directory) - 1] == '/' ? "" : "/",
+             type ? "OpenBorLog.txt" : "ScriptLog.txt");
+    return path;
+}
+#define CHECK_LOGFILE(type)  fileExists(configuredLogPath(type))
+#define OPEN_LOGFILE(type)   fopen(configuredLogPath(type), "wt")
+#define APPEND_LOGFILE(type) fopen(configuredLogPath(type), "at")
+#define READ_LOGFILE(type)   fopen(configuredLogPath(type), "rt")
+#else
 #define CHECK_LOGFILE(type)  type ? fileExists("./Logs/OpenBorLog.txt") : fileExists("./Logs/ScriptLog.txt")
 #define OPEN_LOGFILE(type)   type ? fopen("./Logs/OpenBorLog.txt", "wt") : fopen("./Logs/ScriptLog.txt", "wt")
 #define APPEND_LOGFILE(type) type ? fopen("./Logs/OpenBorLog.txt", "at") : fopen("./Logs/ScriptLog.txt", "at")
 #define READ_LOGFILE(type)   type ? fopen("./Logs/OpenBorLog.txt", "rt") : fopen("./Logs/ScriptLog.txt", "rt")
+#endif
 #define COPY_ROOT_PATH(buf, name) strcpy(buf, "./"); strcat(buf, name); strcat(buf, "/");
 #define COPY_PAKS_PATH(buf, name) strcpy(buf, "./Paks/"); strcat(buf, name);
 #endif
