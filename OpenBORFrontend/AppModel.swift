@@ -1,15 +1,33 @@
 import AppKit
+import Combine
 import Foundation
 import SQLite3
 import UniformTypeIdentifiers
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
+private struct StartupRequest {
+    let launchPak: URL?
+    let engineArguments: [String]
+    let useMetal: Bool
+    let metalShader: String?
+    let pakDirectoryOverride: URL?
+    let savesDirectoryOverride: URL?
+    let logsDirectoryOverride: URL?
+    let screenshotsDirectoryOverride: URL?
+}
+
 struct GameEntry: Identifiable, Hashable {
     let id: String
     let title: String
     let pakURL: URL
     let modifiedAt: Date
+}
+
+enum LauncherRenderBackend: String, CaseIterable, Identifiable {
+    case metal, openGL
+    var id: String { rawValue }
+    var title: String { self == .metal ? "Metal / V2" : "OpenGL / V2" }
 }
 
 struct SaveEntry: Identifiable, Hashable {
@@ -19,6 +37,22 @@ struct SaveEntry: Identifiable, Hashable {
     
     var displayName: String {
         fileURL.deletingPathExtension().lastPathComponent
+    }
+}
+
+enum MetalShaderPreset: String, CaseIterable, Identifiable {
+    case off = "off"
+    case scanlines = "scanlines"
+    case crtLite = "crt-lite"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .off: return "Off"
+        case .scanlines: return "Scanlines"
+        case .crtLite: return "CRT Lite"
+        }
     }
 }
 
@@ -149,6 +183,19 @@ private enum ScreenScraperClient {
 
 @MainActor
 final class AppModel: ObservableObject {
+    let runtimeCoordinator = HostWindowCoordinator()
+    private var runtimeObservation: AnyCancellable?
+    private var terminationObserver: NSObjectProtocol?
+    private var didHandleStartup = false
+    @Published var renderBackend = LauncherRenderBackend(rawValue: UserDefaults.standard.string(forKey: "launcher.renderBackend") ?? "") ?? .metal {
+        didSet { UserDefaults.standard.set(renderBackend.rawValue, forKey: "launcher.renderBackend") }
+    }
+    @Published var animatedBackground = UserDefaults.standard.object(forKey: "launcher.animatedBackground") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(animatedBackground, forKey: "launcher.animatedBackground") }
+    }
+    private static let useMetalDefaultsKey = "video.useMetalRenderer"
+    private static let metalShaderDefaultsKey = "video.metalShaderPreset"
+
     @Published var games: [GameEntry] = []
     @Published var selectedGameID: GameEntry.ID?
     @Published var statusText = "Ready"
@@ -156,6 +203,12 @@ final class AppModel: ObservableObject {
     @Published var searchText = ""
     @Published private(set) var coverURLs: [String: URL] = [:]
     @Published private(set) var coverRefreshTokens: [String: UUID] = [:]
+    @Published var useMetalRenderer = AppModel.defaultUseMetalRendererValue() {
+        didSet { UserDefaults.standard.set(useMetalRenderer, forKey: Self.useMetalDefaultsKey) }
+    }
+    @Published var metalShaderPresetRawValue = AppModel.defaultMetalShaderPresetRawValue() {
+        didSet { UserDefaults.standard.set(metalShaderPresetRawValue, forKey: Self.metalShaderDefaultsKey) }
+    }
     @Published var screenScraperDeveloperID = UserDefaults.standard.string(forKey: "ss.developerID") ?? "" {
         didSet { UserDefaults.standard.set(screenScraperDeveloperID, forKey: "ss.developerID") }
     }
@@ -177,28 +230,70 @@ final class AppModel: ObservableObject {
     let coverDatabaseURL: URL
     
     private let startupPak: URL?
+    private let startupEngineArguments: [String]
+    private let startupUseMetal: Bool
+    private let startupRequest: StartupRequest
     private var coverDatabase: OpaquePointer?
     private var screenScraperFetchInFlight: Set<String> = []
     
     init() {
+        // Preserve the tested V2 preferences on the first integrated launch.
+        if let testingDefaults = UserDefaults.standard.persistentDomain(forName: "com.sasus470.openbor-mac-v2") {
+            for key in ["quickMenuKeyboard", "quickMenuController", "interfaceLanguage", "hostShader.global", "hostShader.games"] where UserDefaults.standard.object(forKey: key) == nil {
+                if let value = testingDefaults[key] { UserDefaults.standard.set(value, forKey: key) }
+            }
+        }
         let fm = FileManager.default
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("OpenBOR Frontend", isDirectory: true)
-        pakDirectory = base.appendingPathComponent("Paks", isDirectory: true)
-        savesDirectory = base.appendingPathComponent("Saves", isDirectory: true)
-        logsDirectory = base.appendingPathComponent("Logs", isDirectory: true)
-        screenshotsDirectory = base.appendingPathComponent("ScreenShots", isDirectory: true)
+        let base = ProcessInfo.processInfo.environment["OPENBOR_FRONTEND_SUPPORT_ROOT"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+                .appendingPathComponent("OpenBOR Frontend", isDirectory: true)
+        UserDefaults.standard.register(defaults: [
+            Self.useMetalDefaultsKey: Self.preferredMetalDefault(),
+            Self.metalShaderDefaultsKey: MetalShaderPreset.off.rawValue
+        ])
+        let startupRequest = AppModel.parseStartupArguments()
+        self.startupRequest = startupRequest
+        pakDirectory = startupRequest.pakDirectoryOverride ?? base.appendingPathComponent("Paks", isDirectory: true)
+        savesDirectory = startupRequest.savesDirectoryOverride ?? base.appendingPathComponent("Saves", isDirectory: true)
+        logsDirectory = startupRequest.logsDirectoryOverride ?? base.appendingPathComponent("Logs", isDirectory: true)
+        screenshotsDirectory = startupRequest.screenshotsDirectoryOverride ?? base.appendingPathComponent("ScreenShots", isDirectory: true)
         coversDirectory = base.appendingPathComponent("Covers", isDirectory: true)
         coverDatabaseURL = base.appendingPathComponent("CoverLibrary.sqlite", isDirectory: false)
-        startupPak = AppModel.parseLaunchArgument()
+        startupPak = startupRequest.launchPak
+        startupEngineArguments = startupRequest.engineArguments
+        startupUseMetal = startupRequest.useMetal
+        if startupUseMetal {
+            useMetalRenderer = true
+        }
+        if let startupShader = startupRequest.metalShader,
+           MetalShaderPreset(rawValue: startupShader) != nil {
+            metalShaderPresetRawValue = startupShader
+        }
         
         ensureDirectories()
         openCoverDatabase()
         importSeedPaksIfNeeded()
         reloadGames()
+        runtimeCoordinator.runtimeMode = .process
+        runtimeCoordinator.configureLaunch = { [weak self] configuration in
+            guard let self else { return configuration }
+            var result = configuration
+            result.useMetalRenderer = self.renderBackend == .metal
+            result.paksDirectoryURL = configuration.pakURL?.deletingLastPathComponent() ?? self.pakDirectory
+            result.logsDirectoryURL = self.logsDirectory
+            result.screenshotsDirectoryURL = self.screenshotsDirectory
+            if let savesOverride = self.startupRequest.savesDirectoryOverride { result.savesDirectoryURL = savesOverride }
+            result.extraArguments = self.startupEngineArguments.filter { !$0.lowercased().hasSuffix(".pak") }
+            return result
+        }
+        runtimeObservation = runtimeCoordinator.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
+        terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.runtimeCoordinator.shutdown() }
+        }
     }
     
     deinit {
+        if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
         if let coverDatabase {
             sqlite3_close(coverDatabase)
         }
@@ -206,6 +301,16 @@ final class AppModel: ObservableObject {
     
     var selectedGame: GameEntry? {
         games.first(where: { $0.id == selectedGameID }) ?? filteredGames.first
+    }
+
+    var localizedRuntimeStatus: String {
+        switch runtimeCoordinator.runtimeState {
+        case .running: return UIStrings.text("Runtime running")
+        case .preparing: return UIStrings.text("Runtime preparing")
+        case .stopping: return UIStrings.text("Runtime stopping")
+        case .failed(let message): return message
+        case .idle: return games.isEmpty ? UIStrings.text("No games in library") : UIStrings.text("Games available", games.count)
+        }
     }
     
     var filteredGames: [GameEntry] {
@@ -216,22 +321,37 @@ final class AppModel: ObservableObject {
     }
     
     var isLaunchOnlyMode: Bool {
-        startupPak != nil
+        startupPak != nil || !startupEngineArguments.isEmpty
+    }
+
+    var metalShaderPreset: MetalShaderPreset {
+        get { MetalShaderPreset(rawValue: metalShaderPresetRawValue) ?? .off }
+        set { metalShaderPresetRawValue = newValue.rawValue }
     }
     
     func handleStartupLaunchIfNeeded() {
-        guard let startupPak else { return }
-        launch(pakURL: startupPak)
-        NSApp.terminate(nil)
+        guard !didHandleStartup else { return }
+        didHandleStartup = true
+        if let startupPak {
+            launch(pakURL: startupPak)
+            return
+        }
+        
+        guard !startupEngineArguments.isEmpty else { return }
+        launch(engineArguments: startupEngineArguments)
     }
     
     func reloadGames() {
         let fm = FileManager.default
-        let urls = (try? fm.contentsOfDirectory(
+        var urls = (try? fm.contentsOfDirectory(
             at: pakDirectory,
             includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
         )) ?? []
+        let testingLibrary = V2LaunchConfigurationFactory.appSupportRootURL().appendingPathComponent("Paks", isDirectory: true)
+        let testingPaks = (try? fm.contentsOfDirectory(at: testingLibrary, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? []
+        let existingNames = Set(urls.map(\.lastPathComponent))
+        urls.append(contentsOf: testingPaks.filter { !existingNames.contains($0.lastPathComponent) })
         
         games = urls
             .filter { $0.pathExtension.lowercased() == "pak" }
@@ -250,7 +370,7 @@ final class AppModel: ObservableObject {
         }
         
         refreshCoverLibrary()
-        statusText = games.isEmpty ? "No games found in Paks" : "\(games.count) game(s) available"
+        statusText = games.isEmpty ? UIStrings.text("No games in library") : UIStrings.text("Games available", games.count)
     }
     
     func coverURL(for game: GameEntry?) -> URL? {
@@ -303,6 +423,10 @@ final class AppModel: ObservableObject {
         launch(pakURL: game.pakURL)
     }
     
+    func launchEngine(with arguments: [String]) {
+        launch(engineArguments: arguments)
+    }
+    
     func openPaksFolder() {
         NSWorkspace.shared.open(pakDirectory)
     }
@@ -325,8 +449,8 @@ final class AppModel: ObservableObject {
     
     func importCover(for game: GameEntry) {
         let panel = NSOpenPanel()
-        panel.title = "Choose cover for \(game.title)"
-        panel.message = "Select a PNG, JPG, JPEG, or WEBP image to use as the game's cover."
+        panel.title = UIStrings.text("Choose cover", game.title)
+        panel.message = UIStrings.text("Cover chooser help")
         panel.allowedContentTypes = [.png, .jpeg, .webP]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
@@ -346,7 +470,7 @@ final class AppModel: ObservableObject {
             saveCoverRecord(for: game, coverURL: destinationURL, source: "manual")
             coverURLs[game.id] = destinationURL
             coverRefreshTokens[game.id] = UUID()
-            statusText = "Cover importata per \(game.title)"
+            statusText = UIStrings.text("Cover imported", game.title)
         } catch {
             NSSound.beep()
             statusText = "Import cover failed: \(error.localizedDescription)"
@@ -354,6 +478,17 @@ final class AppModel: ObservableObject {
     }
     
     private func launch(pakURL: URL) {
+        runtimeCoordinator.selectedPakURL = pakURL
+        runtimeCoordinator.runtimeMode = .process
+        runtimeCoordinator.showHostWindow()
+        statusText = UIStrings.text("Launching %@", pakURL.deletingPathExtension().lastPathComponent)
+    }
+    
+    private func launch(engineArguments: [String]) {
+        if let path = engineArguments.first, path.lowercased().hasSuffix(".pak") {
+            launch(pakURL: URL(fileURLWithPath: path))
+            return
+        }
         let engineApp = Bundle.main.resourceURL?
             .appendingPathComponent("Engine/OpenBOR.app", isDirectory: true)
         guard let engineApp, FileManager.default.fileExists(atPath: engineApp.path) else {
@@ -365,22 +500,28 @@ final class AppModel: ObservableObject {
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
         config.createsNewApplicationInstance = true
-        config.arguments = [pakURL.path]
+        config.arguments = engineArguments
         config.environment = [
             "OPENBOR_PAKS_DIR": pakDirectory.path,
             "OPENBOR_SAVES_DIR": savesDirectory.path,
             "OPENBOR_LOGS_DIR": logsDirectory.path,
-            "OPENBOR_SCREENSHOTS_DIR": screenshotsDirectory.path
+            "OPENBOR_SCREENSHOTS_DIR": screenshotsDirectory.path,
+            "OPENBOR_USE_METAL": (startupUseMetal || useMetalRenderer) ? "1" : "0",
+            "OPENBOR_METAL_SHADER": metalShaderPreset.rawValue
         ]
         
-        statusText = "Launching \(pakURL.lastPathComponent)..."
+        if let firstArgument = engineArguments.first, !firstArgument.isEmpty {
+            statusText = "Launching \(URL(fileURLWithPath: firstArgument).lastPathComponent)..."
+        } else {
+            statusText = "Launching OpenBOR..."
+        }
         NSWorkspace.shared.openApplication(at: engineApp, configuration: config) { _, error in
             Task { @MainActor in
                 if let error {
                     self.statusText = "Launch failed: \(error.localizedDescription)"
                     NSSound.beep()
                 } else {
-                    self.statusText = "Running \(pakURL.lastPathComponent)"
+                    self.statusText = "OpenBOR running"
                 }
             }
         }
@@ -406,12 +547,123 @@ final class AppModel: ObservableObject {
         }
     }
     
-    private static func parseLaunchArgument() -> URL? {
-        let args = CommandLine.arguments
-        guard let index = args.firstIndex(of: "--launch"), index + 1 < args.count else {
-            return nil
+    private static func parseStartupArguments() -> StartupRequest {
+        let args = Array(CommandLine.arguments.dropFirst())
+        var index = 0
+        var launchPak: URL?
+        var engineArguments: [String] = []
+        var useMetal = false
+        var metalShader: String?
+        var pakDirectoryOverride: URL?
+        var savesDirectoryOverride: URL?
+        var logsDirectoryOverride: URL?
+        var screenshotsDirectoryOverride: URL?
+        
+        while index < args.count {
+            let argument = args[index]
+            switch argument {
+            case "--launch", "--pak":
+                if index + 1 < args.count {
+                    launchPak = URL(fileURLWithPath: args[index + 1])
+                    index += 1
+                }
+            case "--engine-args":
+                engineArguments.append(contentsOf: Array(args.suffix(from: index + 1)))
+                index = args.count
+            case "--engine-arg":
+                if index + 1 < args.count {
+                    engineArguments.append(args[index + 1])
+                    index += 1
+                }
+            case "--metal":
+                useMetal = true
+            case "--metal-shader":
+                if index + 1 < args.count {
+                    metalShader = args[index + 1]
+                    index += 1
+                }
+            case "--paks-dir":
+                if index + 1 < args.count {
+                    pakDirectoryOverride = URL(fileURLWithPath: args[index + 1], isDirectory: true)
+                    index += 1
+                }
+            case "--saves-dir":
+                if index + 1 < args.count {
+                    savesDirectoryOverride = URL(fileURLWithPath: args[index + 1], isDirectory: true)
+                    index += 1
+                }
+            case "--logs-dir":
+                if index + 1 < args.count {
+                    logsDirectoryOverride = URL(fileURLWithPath: args[index + 1], isDirectory: true)
+                    index += 1
+                }
+            case "--screenshots-dir":
+                if index + 1 < args.count {
+                    screenshotsDirectoryOverride = URL(fileURLWithPath: args[index + 1], isDirectory: true)
+                    index += 1
+                }
+            case "--help", "-h":
+                AppModel.printCLIHelp()
+            default:
+                engineArguments.append(argument)
+            }
+            index += 1
         }
-        return URL(fileURLWithPath: args[index + 1])
+        
+        return StartupRequest(
+            launchPak: launchPak,
+            engineArguments: engineArguments,
+            useMetal: useMetal,
+            metalShader: metalShader,
+            pakDirectoryOverride: pakDirectoryOverride,
+            savesDirectoryOverride: savesDirectoryOverride,
+            logsDirectoryOverride: logsDirectoryOverride,
+            screenshotsDirectoryOverride: screenshotsDirectoryOverride
+        )
+    }
+
+    private static func preferredMetalDefault() -> Bool {
+#if arch(arm64)
+        return true
+#else
+        return false
+#endif
+    }
+
+    private static func defaultUseMetalRendererValue() -> Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: useMetalDefaultsKey) == nil {
+            return preferredMetalDefault()
+        }
+        return defaults.bool(forKey: useMetalDefaultsKey)
+    }
+
+    private static func defaultMetalShaderPresetRawValue() -> String {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: metalShaderDefaultsKey) == nil {
+            return MetalShaderPreset.off.rawValue
+        }
+        return defaults.string(forKey: metalShaderDefaultsKey) ?? MetalShaderPreset.off.rawValue
+    }
+    
+    private static func printCLIHelp() {
+        let help = """
+        OpenBOR Frontend Launcher CLI
+        
+        Options:
+          --pak <file>              Launch a specific .pak
+          --launch <file>           Alias of --pak
+          --paks-dir <dir>          Override Paks directory
+          --saves-dir <dir>         Override Saves directory
+          --logs-dir <dir>          Override Logs directory
+          --screenshots-dir <dir>   Override ScreenShots directory
+          --engine-arg <arg>        Forward a single raw argument to OpenBOR
+          --engine-args ...         Forward all remaining arguments to OpenBOR
+          --metal                   Launch OpenBOR with the experimental Metal backend
+          --metal-shader <preset>   Metal shader preset: off, scanlines, crt-lite
+          --help                    Show this help
+        """
+        print(help)
     }
     
     private func openCoverDatabase() {

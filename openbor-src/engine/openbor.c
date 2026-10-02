@@ -45,6 +45,127 @@ int        num_difficulties;
 int no_cmd_compatible = 0;
 
 int		skiptoset = -1;
+
+static int hosted_resume_should_persist_on_shutdown(void);
+static void hosted_resume_persist_on_shutdown(void);
+static int hosted_autoresume_requested(void);
+static int hosted_autoresume_slot(void);
+static void hosted_live_state_export_if_requested(void);
+static int hosted_quick_menu_paused(void);
+static void hosted_live_state_write_manifest(const char *manifest_path);
+static int hosted_live_state_entity_slot(const entity *needle);
+static void hosted_live_state_write_boot_file(const char *manifest_path);
+static void hosted_live_state_write_script_file(const char *manifest_path);
+static void hosted_live_state_write_entity_variables_file(const char *manifest_path);
+static void hosted_live_state_restore_script_file(void);
+static void hosted_live_state_restore_entity_variables_file(entity **restored_by_slot, int max_slot);
+static int hosted_live_state_load_boot_file(void);
+static void hosted_live_state_apply_boot_after_level_load(void);
+static int hosted_live_resume_pause_requested;
+static int hosted_live_rebuilding_entities;
+static int hosted_rewind_restoring;
+static int hosted_rewind_update(int ingame);
+
+typedef struct
+{
+    int slot;
+    char model_name[MAX_NAME_LEN];
+    char default_model_name[MAX_NAME_LEN];
+    int model_type;
+    int player_index;
+    int owner_slot;
+    int parent_slot;
+    int opponent_slot;
+    int weapon_slot;
+    unsigned health;
+    unsigned mp;
+    float x;
+    float y;
+    float z;
+    float velocity_x;
+    float velocity_y;
+    float velocity_z;
+    unsigned animnum;
+    unsigned animpos;
+    int direction;
+    int projectile;
+    int falling;
+    int drop;
+    unsigned dying;
+    int death_state;
+    unsigned long nextanim;
+    unsigned long nextthink;
+    unsigned long nextmove;
+    unsigned long nextattack;
+    unsigned long timestamp;
+    int animating;
+    int idling;
+    int lifespan_countdown;
+    float speed_multiplier;
+    float base;
+    float move_x;
+    float move_z;
+    int has_action_state;
+    int has_lifecycle_state;
+    unsigned autokill;
+    int action_id;
+    int attacking, charging, running, jumping, tocost, weapon_state;
+    int smartbomb, inpain, rising, ducking, blocking;
+    unsigned long pausetime, stalltime;
+} s_hosted_live_entity_boot;
+
+typedef struct
+{
+    int loaded;
+    int version;
+    int applied;
+    int set;
+    int level_index;
+    int stage;
+    int spawn;
+    int credits;
+    int level_pos;
+    int level_waiting;
+    int paused;
+    int spawn_group_min;
+    int spawn_group_max;
+    unsigned long advance_time;
+    int time_left;
+    int next_plan;
+    unsigned elapsed_time;
+    unsigned long long random_seed;
+    float advance_x;
+    float advance_y;
+    char music_name[MAX_BUFFER_LEN];
+    int music_loop;
+    u32 music_offset;
+    int entity_count;
+    s_hosted_live_entity_boot *entities;
+    struct
+    {
+        int active;
+        char name[MAX_NAME_LEN];
+        unsigned lives;
+        unsigned credits;
+        unsigned score;
+        int colourmap;
+        int weapon;
+        int spawnhealth;
+        int spawnmp;
+        unsigned health;
+        unsigned mp;
+        float x;
+        float y;
+        float z;
+        float velocity_x;
+        float velocity_y;
+        float velocity_z;
+        int direction;
+    } player_state[MAX_PLAYERS];
+} s_hosted_live_boot_state;
+
+static s_hosted_live_boot_state hosted_live_boot_state;
+
 //when there are more entities than this, those with lower priority will be erased
 int spawnoverride = 999999;
 int maxentities = 999999;
@@ -23623,6 +23744,13 @@ void update_frame(entity *ent, unsigned int f)
     self = ent;
 
     self->animpos = f;
+    /* Reconstruction selects a saved frame without replaying its scripts,
+     * movement, child spawns, weapon changes or sounds. */
+    if(hosted_live_rebuilding_entities)
+    {
+        self = tempself;
+        return;
+    }
     //self->currentsprite = self->animation->sprite[f];
 
     if(self->animating)
@@ -27790,9 +27918,16 @@ void check_gravity(entity *e)
                         else if((!self->animation->move[self->animpos]->base || self->animation->move[self->animpos]->base < 0) &&
                                 (!self->animation->move[self->animpos]->axis.y || self->animation->move[self->animpos]->axis.y <= 0))
                         {
-                            self->velocity.x = 0;
-                            self->velocity.z = 0;
-                            self->velocity.y = 0;
+                            if(self->energy_state.health_current <= 0 && self->animating)
+                            {
+                                self->velocity.y = 0;
+                            }
+                            else
+                            {
+                                self->velocity.x = 0;
+                                self->velocity.z = 0;
+                                self->velocity.y = 0;
+                            }
                         }
                         else
                         {
@@ -27840,6 +27975,26 @@ int check_lost()
                               ((level->scrolldir == SCROLL_UP || level->scrolldir == SCROLL_DOWN) && (self->position.z - self->position.y < -osk || self->position.z - self->position.y > videomodes.vRes + osk))		) )
             || self->position.y < 2 * PIT_DEPTH) //self->position.z<ITEM_HIDE_POSITION_Z, so weapon item won't be killed
     {
+        if(self->model && self->model->name &&
+           (!stricmp(self->model->name, "shta")  ||
+            !stricmp(self->model->name, "shta1") ||
+            !stricmp(self->model->name, "shta2") ||
+            !stricmp(self->model->name, "las")   ||
+            !stricmp(self->model->name, "blst1") ||
+            !stricmp(self->model->name, "blst2")))
+        {
+            writeToLogFile("[mac-projectile-lost] model='%s' pos=(%.2f,%.2f,%.2f) osk=%d advance=(%.2f,%.2f) screen=(%d,%d)\n",
+                           self->model->name,
+                           self->position.x,
+                           self->position.y,
+                           self->position.z,
+                           osk,
+                           advancex,
+                           advancey,
+                           videomodes.hRes,
+                           videomodes.vRes);
+        }
+
         if(self->modeldata.type & TYPE_PLAYER)
         {
             player_die();
@@ -30050,6 +30205,21 @@ int set_death(entity *iDie, int type, int reset)
 
     if ( iDie->inbackpain ) die = animbackdies[type];
     else die = animdies[type];
+
+    if(iDie->model && iDie->model->name &&
+       (iDie->modeldata.type & (TYPE_ENEMY | TYPE_OBSTACLE | TYPE_NPC)))
+    {
+        writeToLogFile("[mac-death-debug] model='%s' type=%d attack_type=%d selected_anim=%d backpain=%d health=%d pos=(%.2f,%.2f,%.2f)\n",
+                       iDie->model->name,
+                       iDie->modeldata.type,
+                       type,
+                       die,
+                       iDie->inbackpain,
+                       iDie->energy_state.health_current,
+                       iDie->position.x,
+                       iDie->position.y,
+                       iDie->position.z);
+    }
 
     if(validanim(iDie, die))
     {
@@ -34147,6 +34317,24 @@ void checkdamage(entity* target_entity, entity* attacking_entity, s_attack* atta
 
 	int	force = 0;
 	int	normal_damage = 0;    
+    int should_log_projectile_damage = 0;
+
+    if(attacking_entity &&
+       attacking_entity->model &&
+       attacking_entity->model->name &&
+       target_entity &&
+       (target_entity->modeldata.type & (TYPE_ENEMY | TYPE_OBSTACLE | TYPE_NPC)))
+    {
+        if(!stricmp(attacking_entity->model->name, "shta")  ||
+           !stricmp(attacking_entity->model->name, "shta1") ||
+           !stricmp(attacking_entity->model->name, "shta2") ||
+           !stricmp(attacking_entity->model->name, "las")   ||
+           !stricmp(attacking_entity->model->name, "blst1") ||
+           !stricmp(attacking_entity->model->name, "blst2"))
+        {
+            should_log_projectile_damage = 1;
+        }
+    }
 
 	/* Get attack damage force after defense is applied. */
     force = calculate_force_damage(target_entity, attacking_entity, attack_object, defense_object);
@@ -34185,6 +34373,22 @@ void checkdamage(entity* target_entity, entity* attacking_entity, s_attack* atta
     if(attack_object->no_kill && target_entity->energy_state.health_current <= 0)
     {
         target_entity->energy_state.health_current = 1;
+    }
+
+    if(should_log_projectile_damage)
+    {
+        writeToLogFile("[mac-hit-debug] attacker='%s' target='%s' attack_type=%d force=%d remaining_hp=%d attack_drop=%d blast=%d no_kill=%d pos_target=(%.2f,%.2f,%.2f)\n",
+                       attacking_entity->model->name,
+                       target_entity->model && target_entity->model->name ? target_entity->model->name : "(null)",
+                       attack_object ? attack_object->attack_type : -1,
+                       force,
+                       target_entity->energy_state.health_current,
+                       attack_object ? attack_object->attack_drop : -1,
+                       attack_object ? attack_object->blast : -1,
+                       attack_object ? attack_object->no_kill : -1,
+                       target_entity->position.x,
+                       target_entity->position.y,
+                       target_entity->position.z);
     }
 
     /* Execute the take damage script. */
@@ -34247,6 +34451,7 @@ int arrow_takedamage(entity *other, s_attack *attack, int fall_flag, s_defense* 
 int common_takedamage(entity *other, s_attack *attack, int fall_flag, s_defense* defense_object)
 {   
     entity* acting_entity = self;
+    int force_projectile_death2 = 0;
 
     int pain_check = 0; // React with pain animations (1) or ignore (0);
     e_death_config_flags death_config;
@@ -34281,6 +34486,35 @@ int common_takedamage(entity *other, s_attack *attack, int fall_flag, s_defense*
     else
     {
         acting_entity->last_damage_type = ATK_NORMAL;
+    }
+
+    if(other &&
+       other->model &&
+       other->model->name &&
+       attack &&
+       attack->attack_type == ATK_NORMAL &&
+       attack->attack_drop > 0)
+    {
+        if(!stricmp(other->model->name, "shta")  ||
+           !stricmp(other->model->name, "shta1") ||
+           !stricmp(other->model->name, "shta2") ||
+           !stricmp(other->model->name, "las")   ||
+           !stricmp(other->model->name, "blst1") ||
+           !stricmp(other->model->name, "blst2"))
+        {
+            force_projectile_death2 = 1;
+        }
+    }
+
+    if(force_projectile_death2)
+    {
+        acting_entity->last_damage_type = ATK_NORMAL2;
+        writeToLogFile("[mac-death2-override] attacker='%s' target='%s' original_attack_type=%d forced_attack_type=%d drop=%d\n",
+                       other->model->name,
+                       acting_entity->model && acting_entity->model->name ? acting_entity->model->name : "(null)",
+                       attack->attack_type,
+                       acting_entity->last_damage_type,
+                       attack->attack_drop);
     }
 
     if (!acting_entity->die_on_landing)
@@ -34422,7 +34656,24 @@ int common_takedamage(entity *other, s_attack *attack, int fall_flag, s_defense*
             // If no fall/die animations exist, entity simply disappears.
             if(!set_fall(acting_entity, other, attack, 1))
             {
-                if(acting_entity->modeldata.type & TYPE_PLAYER)
+                if(acting_entity->energy_state.health_current <= 0 &&
+                   set_death(acting_entity, acting_entity->last_damage_type, 1))
+                {
+                    acting_entity->drop = 1;
+                    acting_entity->falling = 1;
+                    acting_entity->noaicontrol = 1;
+                    acting_entity->modeldata.move_config_flags &= ~MOVE_CONFIG_NO_MOVE;
+                    acting_entity->modeldata.pain_config_flags &= ~PAIN_CONFIG_FALL_DISABLE;
+                    acting_entity->trymove = NULL;
+                    if(acting_entity->position.y <= acting_entity->base)
+                    {
+                        acting_entity->position.y = acting_entity->base + 1.0f;
+                    }
+                    toss(acting_entity, 0.35f);
+                    acting_entity->takeaction = common_lie;
+                    acting_entity->stalltime = _time;
+                }
+                else if(acting_entity->modeldata.type & TYPE_PLAYER)
                 {
                     player_die();
                 }
@@ -42904,6 +43155,7 @@ int faction_check_player_verses(entity* acting_entity, entity* target_entity, e_
 entity *knife_spawn(entity *parent, s_projectile *projectile)
 {
     entity *projectile_entity = NULL;
+    int preserve_spawn_behavior = 0;
 
 	s_axis_principal_float position;
 	e_direction direction = DIRECTION_RIGHT;
@@ -43011,6 +43263,52 @@ entity *knife_spawn(entity *parent, s_projectile *projectile)
         return NULL;
     }
 
+    preserve_spawn_behavior = (projectile_entity->modeldata.type == TYPE_NONE);
+
+    if(projectile_entity->model && projectile_entity->model->name &&
+       (!stricmp(projectile_entity->model->name, "shta")  ||
+        !stricmp(projectile_entity->model->name, "shta1") ||
+        !stricmp(projectile_entity->model->name, "shta2") ||
+        !stricmp(projectile_entity->model->name, "las")   ||
+        !stricmp(projectile_entity->model->name, "blst1") ||
+        !stricmp(projectile_entity->model->name, "blst2")))
+    {
+        int minimum_offscreenkill = videomodes.hRes * 2;
+        if(projectile_entity->modeldata.offscreenkill < minimum_offscreenkill)
+        {
+            projectile_entity->modeldata.offscreenkill = minimum_offscreenkill;
+        }
+
+        if(projectile_entity->animation && projectile_entity->animation->numframes >= 2)
+        {
+            projectile_entity->animation->loop.mode = 1;
+            projectile_entity->animation->loop.frame.min = projectile_entity->animation->numframes - 2;
+            projectile_entity->animation->loop.frame.max = projectile_entity->animation->numframes - 1;
+        }
+    }
+
+    if(projectile_entity->model && projectile_entity->model->name &&
+       (!stricmp(projectile_entity->model->name, "wb1") ||
+        !stricmp(projectile_entity->model->name, "wb2") ||
+        !stricmp(projectile_entity->model->name, "wb3") ||
+        !stricmp(projectile_entity->model->name, "shta") ||
+        !stricmp(projectile_entity->model->name, "shta1") ||
+        !stricmp(projectile_entity->model->name, "shta2") ||
+        !stricmp(projectile_entity->model->name, "las") ||
+        !stricmp(projectile_entity->model->name, "blst1") ||
+        !stricmp(projectile_entity->model->name, "blst2")))
+    {
+        writeToLogFile("[mac-spawn-debug] parent='%s' child='%s' child_type=%d preserve=%d proj_prime=%d pos=(%.2f,%.2f,%.2f)\n",
+                       parent && parent->model && parent->model->name ? parent->model->name : "(null)",
+                       projectile_entity->model->name,
+                       projectile_entity->modeldata.type,
+                       preserve_spawn_behavior,
+                       projectile_prime,
+                       projectile_entity->position.x,
+                       projectile_entity->position.y,
+                       projectile_entity->position.z);
+    }
+
     /*
     * Get result of direction adjustment. We need this before we can handle
     * positioning on X axis.
@@ -43046,7 +43344,7 @@ entity *knife_spawn(entity *parent, s_projectile *projectile)
     * Player projectiles are always type "shot", unless 
     * using the current PROJECTILE type.
     */
-    if (!(projectile_entity->modeldata.type & TYPE_PROJECTILE))
+    if (!preserve_spawn_behavior && !(projectile_entity->modeldata.type & TYPE_PROJECTILE))
     {
         if (parent->modeldata.type & TYPE_PLAYER)
         {
@@ -43074,64 +43372,71 @@ entity *knife_spawn(entity *parent, s_projectile *projectile)
 	apply_color_set_adjust(projectile_entity, parent, projectile->color_set_adjust);
 		
 
-    /*
-	* If no move, then all speed is 0. Otherwise check for use of
-	* projectile velocity. If player supplied any value other 
-	* than MODEL_SPEED_NONE, we use player's value. If not, fall
-	* back to default values. This is a bit overcomplicated, but
-	* allows players to supply a 0 velocity value on any axis.
-	*/
-    if (projectile_entity->modeldata.move_config_flags & MOVE_CONFIG_NO_MOVE)
-	{
-        projectile_entity->modeldata.speed.x = 0;
-        projectile_entity->modeldata.speed.y = 0;
-        projectile_entity->modeldata.speed.z = 0;
-	}
-	else
-	{	
-		/* Copy speed values from animation projectile settings to model. */
-        projectile_entity->modeldata.speed = projectile->velocity;
-	}
+    if (!preserve_spawn_behavior)
+    {
+        /*
+	    * If no move, then all speed is 0. Otherwise check for use of
+	    * projectile velocity. If player supplied any value other 
+	    * than MODEL_SPEED_NONE, we use player's value. If not, fall
+	    * back to default values. This is a bit overcomplicated, but
+	    * allows players to supply a 0 velocity value on any axis.
+	    */
+        if (projectile_entity->modeldata.move_config_flags & MOVE_CONFIG_NO_MOVE)
+	    {
+            projectile_entity->modeldata.speed.x = 0;
+            projectile_entity->modeldata.speed.y = 0;
+            projectile_entity->modeldata.speed.z = 0;
+	    }
+	    else
+	    {	
+		    /* Copy speed values from animation projectile settings to model. */
+            projectile_entity->modeldata.speed = projectile->velocity;
+	    }
 
-	/* Set up behavior flags. */
-    projectile_entity->spawntype = SPAWN_TYPE_PROJECTILE_NORMAL;
-    projectile_entity->owner = parent;
-    projectile_entity->nograb = 1;
-    projectile_entity->attacking = ATTACKING_ACTIVE;
-    projectile_entity->think = common_think;
-    projectile_entity->nextthink = _time + 1;
-    projectile_entity->trymove = NULL;
-    projectile_entity->takedamage = arrow_takedamage;
-    projectile_entity->takeaction = NULL;
-    projectile_entity->modeldata.aimove = AIMOVE1_ARROW;
-    projectile_entity->speedmul = 2;
-    projectile_entity->modeldata.aiattack = AIATTACK1_NOATTACK;
-    
-    if(!projectile_entity->modeldata.offscreenkill)
-    {
-        projectile_entity->modeldata.offscreenkill = 200;    //default value
-    }	
-    
-	/* Kill self when we hit. */
-	if (projectile_entity->modeldata.remove)
-	{
-        projectile_entity->autokill |= AUTOKILL_ATTACK_HIT;
-	}
+	    /* Set up behavior flags. */
+        projectile_entity->spawntype = SPAWN_TYPE_PROJECTILE_NORMAL;
+        projectile_entity->owner = parent;
+        projectile_entity->nograb = 1;
+        projectile_entity->attacking = ATTACKING_ACTIVE;
+        projectile_entity->think = common_think;
+        projectile_entity->nextthink = _time + 1;
+        projectile_entity->trymove = NULL;
+        projectile_entity->takedamage = arrow_takedamage;
+        projectile_entity->takeaction = NULL;
+        projectile_entity->modeldata.aimove = AIMOVE1_ARROW;
+        projectile_entity->speedmul = 2;
+        projectile_entity->modeldata.aiattack = AIATTACK1_NOATTACK;
+        
+        if(!projectile_entity->modeldata.offscreenkill)
+        {
+            projectile_entity->modeldata.offscreenkill = 200;    //default value
+        }	
+        
+	    /* Kill self when we hit. */
+	    if (projectile_entity->modeldata.remove)
+	    {
+            projectile_entity->autokill |= AUTOKILL_ATTACK_HIT;
+	    }
 	
-    /* Kill self when we finish animation. */
-	if (projectile_entity->modeldata.move_config_flags & MOVE_CONFIG_NO_MOVE)
-	{
-        projectile_entity->autokill |= AUTOKILL_ANIMATION_COMPLETE;
-	}
+        /* Kill self when we finish animation. */
+	    if (projectile_entity->modeldata.move_config_flags & MOVE_CONFIG_NO_MOVE)
+	    {
+            projectile_entity->autokill |= AUTOKILL_ANIMATION_COMPLETE;
+	    }
 	
-	/* Is this a floor or flying projectile ? Set base accordingly. */
-    if(projectile_entity->projectile_prime & PROJECTILE_PRIME_BASE_FLOOR)
-    {
-        projectile_entity->base = 0;
+	    /* Is this a floor or flying projectile ? Set base accordingly. */
+        if(projectile_entity->projectile_prime & PROJECTILE_PRIME_BASE_FLOOR)
+        {
+            projectile_entity->base = 0;
+        }
+        else
+        {
+            projectile_entity->base = position.y;
+        }
     }
     else
     {
-        projectile_entity->base = position.y;
+        projectile_entity->owner = parent;
     }
 
     /*
@@ -43159,16 +43464,19 @@ entity *knife_spawn(entity *parent, s_projectile *projectile)
     * setup depending on what function creator used.
     */
     
-    projectile_entity->modeldata.move_config_flags |= (MOVE_CONFIG_PROJECTILE_BASE_DIE | MOVE_CONFIG_SUBJECT_TO_HOLE | MOVE_CONFIG_SUBJECT_TO_PLATFORM | MOVE_CONFIG_SUBJECT_TO_WALL | MOVE_CONFIG_PROJECTILE_WALL_BOUNCE);
-    projectile_entity->modeldata.move_config_flags &= ~MOVE_CONFIG_NO_ADJUST_BASE;
+    if (!preserve_spawn_behavior)
+    {
+        projectile_entity->modeldata.move_config_flags |= (MOVE_CONFIG_PROJECTILE_BASE_DIE | MOVE_CONFIG_SUBJECT_TO_HOLE | MOVE_CONFIG_SUBJECT_TO_PLATFORM | MOVE_CONFIG_SUBJECT_TO_WALL | MOVE_CONFIG_PROJECTILE_WALL_BOUNCE);
+        projectile_entity->modeldata.move_config_flags &= ~MOVE_CONFIG_NO_ADJUST_BASE;
 
-    if (projectile_entity->projectile_prime & PROJECTILE_PRIME_INITIALIZE_LEGACY_PROJECTILE_FUNCTION)
-    {
-        projectile_entity->modeldata.move_config_flags |= MOVE_CONFIG_SUBJECT_TO_GRAVITY;
-    }
-    else
-    {
-        projectile_entity->modeldata.move_config_flags &= ~MOVE_CONFIG_SUBJECT_TO_GRAVITY;
+        if (projectile_entity->projectile_prime & PROJECTILE_PRIME_INITIALIZE_LEGACY_PROJECTILE_FUNCTION)
+        {
+            projectile_entity->modeldata.move_config_flags |= MOVE_CONFIG_SUBJECT_TO_GRAVITY;
+        }
+        else
+        {
+            projectile_entity->modeldata.move_config_flags &= ~MOVE_CONFIG_SUBJECT_TO_GRAVITY;
+        }
     }
         
 	/* Execute the projectile's on spawn event. */
@@ -45679,19 +45987,45 @@ void update(int ingame, int usevwait)
 {
     int i = 0;
     int p_keys = 0;
+    int rewinding;
 
     getinterval();
-    if(playrecstatus->status == A_REC_PLAY && !_pause && level) if ( !playRecordedInputs() ) stopRecordInputs();
-    inputrefresh(playrecstatus->status);
-    if(playrecstatus->status == A_REC_REC && !_pause && level) if ( !recordInputs() ) stopRecordInputs();
+    rewinding = hosted_rewind_update(ingame);
+    if(hosted_quick_menu_paused() && !rewinding)
+    {
+        /* Keep the last rendered frame and service captures without running
+         * game scripts or consuming any simulation ticks. */
+        hosted_live_state_export_if_requested();
+        vga_vwait();
+        return;
+    }
+    hosted_live_state_export_if_requested();
+    if(!rewinding)
+    {
+        if(playrecstatus->status == A_REC_PLAY && !_pause && level) if ( !playRecordedInputs() ) stopRecordInputs();
+        inputrefresh(playrecstatus->status);
+        if(playrecstatus->status == A_REC_REC && !_pause && level) if ( !recordInputs() ) stopRecordInputs();
+    }
 
-    if ((!_pause && ingame == 1) || alwaysupdate)
+    /* A saved pause menu cannot be copied as pixels. Recreate it before the
+     * first simulation tick, preserving the paused gameplay position. */
+    if(hosted_live_resume_pause_requested && ingame == 1 && !_pause && level)
+    {
+        hosted_live_resume_pause_requested = 0;
+        bothnewkeys = 0;
+        sound_pause_music(1);
+        sound_pause_sample(1);
+        pausemenu();
+        return;
+    }
+
+    if (!rewinding && ((!_pause && ingame == 1) || alwaysupdate))
     {
         execute_updatescripts();
     }
 
     newtime = 0;
-    if(!_pause)
+    if(!_pause && !rewinding)
     {
         if(ingame == 1 || check_in_screen())
         {
@@ -45818,7 +46152,7 @@ void update(int ingame, int usevwait)
         }
 
     /************ updated script  ************/
-    if(ingame == 1 || alwaysupdate)
+    if(!rewinding && (ingame == 1 || alwaysupdate))
     {
         execute_updatedscripts();
     }
@@ -45839,7 +46173,7 @@ void update(int ingame, int usevwait)
              (player[2].ent && (player[2].newkeys & FLAG_START)) ||
              (player[3].ent && (player[3].newkeys & FLAG_START)))
       )*/
-    if(ingame == 1 && !_pause && !nopause && p_keys)
+    if(!rewinding && ingame == 1 && !_pause && !nopause && p_keys)
     {
         if ( !(goto_mainmenu_flag&1) )
         {
@@ -45891,14 +46225,14 @@ void update(int ingame, int usevwait)
 #endif
     }
 
-    if(usevwait)
+    if(usevwait || rewinding)
     {
         vga_vwait();
     }
     video_copy_screen(vscreen);
     spriteq_clear();
 
-    check_music();
+    if(!rewinding) check_music();
     sound_update_music();
 }
 
@@ -46153,6 +46487,7 @@ void borShutdown(int status, char *msg, ...)
         printf("%s", buf);
     }
 
+    hosted_resume_persist_on_shutdown();
 
     getRamStatus(BYTES);
     savesettings();
@@ -47109,6 +47444,1375 @@ void savelevelinfo()
     for(i = 0; i < sizeof(allowselect_args); i++) save->allowSelectArgs[i] = allowselect_args[i];
 }
 
+static int hosted_resume_should_persist_on_shutdown()
+{
+    int i;
+    const char *hosted = getenv("OPENBOR_V2_HOSTED");
+
+    if(!(hosted && hosted[0] == '1'))
+    {
+        return 0;
+    }
+
+    if(!savelevel || current_set < 0 || current_set >= num_difficulties)
+    {
+        return 0;
+    }
+
+    if(current_level > 0 || current_stage > 1)
+    {
+        return 1;
+    }
+
+    for(i = 0; i < MAX_PLAYERS; i++)
+    {
+        if(player[i].hasplayed || player[i].lives > 0 || player[i].score > 0)
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void hosted_resume_persist_on_shutdown()
+{
+    if(!hosted_resume_should_persist_on_shutdown())
+    {
+        return;
+    }
+
+    savelevelinfo();
+    saveGameFile();
+    saveHighScoreFile();
+    saveScriptFile();
+}
+
+static int hosted_autoresume_requested()
+{
+    const char *value = getenv("OPENBOR_V2_AUTORESUME");
+    return value && value[0] == '1';
+}
+
+static int hosted_autoresume_slot()
+{
+    int i;
+
+    if(!hosted_autoresume_requested())
+    {
+        return -1;
+    }
+
+    if(hosted_live_state_load_boot_file())
+    {
+        return hosted_live_boot_state.set;
+    }
+
+    if(!loadGameFile())
+    {
+        return -1;
+    }
+
+    for(i = 0; i < num_difficulties; i++)
+    {
+        s_savelevel *save = savelevel + i;
+        int hasPlayerState = 0;
+        int playerIndex = 0;
+
+        for(playerIndex = 0; playerIndex < MAX_PLAYERS; playerIndex++)
+        {
+            if(save->pLives[playerIndex] > 0 || save->pScores[playerIndex] > 0)
+            {
+                hasPlayerState = 1;
+                break;
+            }
+        }
+
+        if(save->flag && (save->level > 0 || save->stage > 1 || hasPlayerState))
+        {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static void hosted_json_write_escaped(FILE *handle, const char *text)
+{
+    const unsigned char *cursor = (const unsigned char *)(text ? text : "");
+    fputc('"', handle);
+
+    while(*cursor)
+    {
+        switch(*cursor)
+        {
+            case '\\':
+                fputs("\\\\", handle);
+                break;
+            case '"':
+                fputs("\\\"", handle);
+                break;
+            case '\n':
+                fputs("\\n", handle);
+                break;
+            case '\r':
+                fputs("\\r", handle);
+                break;
+            case '\t':
+                fputs("\\t", handle);
+                break;
+            default:
+                if(*cursor < 0x20)
+                {
+                    fprintf(handle, "\\u%04x", *cursor);
+                }
+                else
+                {
+                    fputc(*cursor, handle);
+                }
+                break;
+        }
+        ++cursor;
+    }
+
+    fputc('"', handle);
+}
+
+/* Stable on-disk action IDs. Append entries; never reorder or save addresses. */
+static void (*const hosted_live_actions[])(void) = {
+    NULL, common_attack_proc, common_spawn, common_fall, common_pain,
+    common_lie, common_rise, common_jump, common_jumpland, common_land,
+    common_charge, common_get, common_block, common_grab, common_grabattack,
+    common_grabbed, common_preduck, common_prejump, common_prethrow,
+    common_throw, common_throw_wait, common_turn, common_walkoff,
+    common_drop, common_dodge, common_idle,
+    normal_prepare, upper_prepare, npc_recall, player_die, suicide,
+    bomb_explode, common_animation_normal, common_attack_finish, common_runoff
+};
+
+static int hosted_live_action_id(const entity *ent)
+{
+    size_t i;
+    for(i = 0; i < sizeof(hosted_live_actions) / sizeof(*hosted_live_actions); ++i)
+        if(ent->takeaction == hosted_live_actions[i]) return (int)i;
+    return -1;
+}
+
+static int hosted_quick_menu_paused(void)
+{
+    static int was_paused = 0;
+    const char *path = getenv("OPENBOR_V2_QUICK_MENU_PAUSE_PATH");
+    FILE *handle;
+    int paused = 0;
+
+    if(path && path[0] && (handle = fopen(path, "r")))
+    {
+        paused = fgetc(handle) == '1';
+        fclose(handle);
+    }
+    if(paused != was_paused)
+    {
+        if(paused || !_pause)
+        {
+            sound_pause_music(paused);
+            sound_pause_sample(paused);
+        }
+        was_paused = paused;
+    }
+    return paused;
+}
+
+static void hosted_live_state_export_if_requested()
+{
+    static int initialized = 0;
+    static char request_path[MAX_BUFFER_LEN] = {0};
+    static char manifest_path[MAX_BUFFER_LEN] = {0};
+    FILE *request_handle = NULL;
+
+    if(!initialized)
+    {
+        const char *request_env = getenv("OPENBOR_V2_LIVESTATE_REQUEST_PATH");
+        const char *manifest_env = getenv("OPENBOR_V2_LIVESTATE_MANIFEST_PATH");
+        initialized = 1;
+
+        if(request_env && request_env[0])
+        {
+            strncpy(request_path, request_env, sizeof(request_path) - 1);
+        }
+
+        if(manifest_env && manifest_env[0])
+        {
+            strncpy(manifest_path, manifest_env, sizeof(manifest_path) - 1);
+        }
+    }
+
+    if(!request_path[0] || !manifest_path[0])
+    {
+        return;
+    }
+
+    request_handle = fopen(request_path, "r");
+    if(!request_handle)
+    {
+        return;
+    }
+
+    fclose(request_handle);
+    remove(request_path);
+    hosted_live_state_write_boot_file(manifest_path);
+    hosted_live_state_write_script_file(manifest_path);
+    hosted_live_state_write_entity_variables_file(manifest_path);
+    /* The manifest is the commit marker read by the host. Publish it last so
+     * all sidecar files belong to the exact same engine frame. */
+    hosted_live_state_write_manifest(manifest_path);
+}
+
+static void hosted_live_state_write_manifest(const char *manifest_path)
+{
+    int i = 0;
+    int active_entities = 0;
+    int player_entities = 0;
+    int enemy_entities = 0;
+    int projectile_entities = 0;
+    int item_entities = 0;
+    int obstacle_entities = 0;
+    int panel_entities = 0;
+    FILE *handle = fopen(manifest_path, "w");
+
+    if(!handle)
+    {
+        return;
+    }
+
+    if(ent_list)
+    {
+        for(i = 0; i < ent_list_size; i++)
+        {
+            entity *ent = ent_list[i];
+            if(!ent || !ent->exists)
+            {
+                continue;
+            }
+
+            ++active_entities;
+            if(ent->modeldata.type & TYPE_PLAYER) ++player_entities;
+            if(ent->modeldata.type & TYPE_ENEMY) ++enemy_entities;
+            if(ent->modeldata.type & TYPE_PROJECTILE) ++projectile_entities;
+            if(ent->modeldata.type & TYPE_ITEM) ++item_entities;
+            if(ent->modeldata.type & TYPE_OBSTACLE) ++obstacle_entities;
+            if(ent->modeldata.type & TYPE_PANEL) ++panel_entities;
+        }
+    }
+
+    fputs("{\n", handle);
+    fputs("  \"schema\": \"openbor-v2-runtime-state-v1\",\n", handle);
+    fputs("  \"captured_from_hosted_runtime\": true,\n", handle);
+    fputs("  \"engine_version\": ", handle);
+    hosted_json_write_escaped(handle, VERSION);
+    fputs(",\n", handle);
+    fprintf(handle, "  \"entity_state_complete\": %d,\n", ent_list ? 1 : 0);
+    fprintf(handle, "  \"current_set\": %d,\n", current_set);
+    fprintf(handle, "  \"current_level\": %d,\n", current_level);
+    fprintf(handle, "  \"current_stage\": %d,\n", current_stage);
+    fprintf(handle, "  \"current_spawn\": %d,\n", current_spawn);
+    fprintf(handle, "  \"elapsed_time\": %u,\n", _time);
+    fprintf(handle, "  \"paused\": %d,\n", _pause);
+    fprintf(handle, "  \"endgame\": %d,\n", endgame);
+    fprintf(handle, "  \"credits_pool\": %d,\n", credits);
+    fprintf(handle, "  \"advancex\": %.3f,\n", advancex);
+    fprintf(handle, "  \"advancey\": %.3f,\n", advancey);
+    fprintf(handle, "  \"scrolldx\": %.3f,\n", scrolldx);
+    fprintf(handle, "  \"scrolldy\": %.3f,\n", scrolldy);
+    fprintf(handle, "  \"background_travel\": %.3f,\n", bgtravelled);
+    fprintf(handle, "  \"background_clock\": %d,\n", traveltime);
+    fprintf(handle, "  \"music_paused\": %d,\n", sound_music_is_paused());
+    fprintf(handle, "  \"music_volume\": %d,\n", sound_get_music_volume());
+
+    if(level && level->name)
+    {
+        fputs("  \"level_name\": ", handle);
+        hosted_json_write_escaped(handle, level->name);
+        fputs(",\n", handle);
+    }
+    else
+    {
+        fputs("  \"level_name\": null,\n", handle);
+    }
+
+    if(levelsets && current_set >= 0 && current_set < num_difficulties &&
+       levelsets[current_set].levelorder &&
+       current_level >= 0 && current_level < levelsets[current_set].numlevels &&
+       levelsets[current_set].levelorder[current_level].filename)
+    {
+        fputs("  \"level_file\": ", handle);
+        hosted_json_write_escaped(handle, levelsets[current_set].levelorder[current_level].filename);
+        fputs(",\n", handle);
+    }
+    else
+    {
+        fputs("  \"level_file\": null,\n", handle);
+    }
+
+    fputs("  \"level_state\": {\n", handle);
+    if(level)
+    {
+        fprintf(handle, "    \"loaded\": 1,\n");
+        fprintf(handle, "    \"pos\": %d,\n", level->pos);
+        fprintf(handle, "    \"width\": %d,\n", level->width);
+        fprintf(handle, "    \"waiting\": %d,\n", level->waiting);
+        fprintf(handle, "    \"type\": %d,\n", level->type);
+        fprintf(handle, "    \"settime\": %d,\n", level->settime);
+        fprintf(handle, "    \"quake\": %d,\n", level->quake);
+        fprintf(handle, "    \"numspawns\": %d,\n", level->numspawns);
+        fprintf(handle, "    \"numholes\": %d,\n", level->numholes);
+        fprintf(handle, "    \"numwalls\": %d,\n", level->numwalls);
+        fprintf(handle, "    \"numtextobjs\": %d\n", level->numtextobjs);
+    }
+    else
+    {
+        fputs("    \"loaded\": 0\n", handle);
+    }
+    fputs("  },\n", handle);
+
+    fputs("  \"entity_counts\": {\n", handle);
+    fprintf(handle, "    \"allocated_slots\": %d,\n", ent_list_size);
+    fprintf(handle, "    \"active\": %d,\n", active_entities);
+    fprintf(handle, "    \"players\": %d,\n", player_entities);
+    fprintf(handle, "    \"enemies\": %d,\n", enemy_entities);
+    fprintf(handle, "    \"projectiles\": %d,\n", projectile_entities);
+    fprintf(handle, "    \"items\": %d,\n", item_entities);
+    fprintf(handle, "    \"obstacles\": %d,\n", obstacle_entities);
+    fprintf(handle, "    \"panels\": %d\n", panel_entities);
+    fputs("  },\n", handle);
+
+    fputs("  \"players\": [\n", handle);
+    for(i = 0; i < MAX_PLAYERS; i++)
+    {
+        if(i > 0) fputs(",\n", handle);
+        fputs("    {\n", handle);
+        fprintf(handle, "      \"index\": %d,\n", i);
+        fputs("      \"name\": ", handle);
+        hosted_json_write_escaped(handle, player[i].name);
+        fputs(",\n", handle);
+        fprintf(handle, "      \"hasplayed\": %d,\n", player[i].hasplayed);
+        fprintf(handle, "      \"lives\": %d,\n", player[i].lives);
+        fprintf(handle, "      \"credits\": %d,\n", player[i].credits);
+        fprintf(handle, "      \"score\": %u,\n", player[i].score);
+        fprintf(handle, "      \"spawnhealth\": %d,\n", player[i].spawnhealth);
+        fprintf(handle, "      \"spawnmp\": %d,\n", player[i].spawnmp);
+        fprintf(handle, "      \"colourmap\": %d,\n", player[i].colourmap);
+        fprintf(handle, "      \"active_entity\": %d", player[i].ent ? 1 : 0);
+        if(player[i].ent)
+        {
+            fprintf(handle, ",\n      \"entity\": {\n");
+            fprintf(handle, "        \"exists\": %d,\n", player[i].ent->exists);
+            fprintf(handle, "        \"health\": %u,\n", player[i].ent->energy_state.health_current);
+            fprintf(handle, "        \"mp\": %u,\n", player[i].ent->energy_state.mp_current);
+            fprintf(handle, "        \"position\": {\"x\": %.3f, \"y\": %.3f, \"z\": %.3f},\n",
+                    player[i].ent->position.x, player[i].ent->position.y, player[i].ent->position.z);
+            fprintf(handle, "        \"velocity\": {\"x\": %.3f, \"y\": %.3f, \"z\": %.3f},\n",
+                    player[i].ent->velocity.x, player[i].ent->velocity.y, player[i].ent->velocity.z);
+            fprintf(handle, "        \"animnum\": %u,\n", player[i].ent->animnum);
+            fprintf(handle, "        \"animpos\": %u,\n", player[i].ent->animpos);
+            fprintf(handle, "        \"map\": %d,\n", player[i].ent->map);
+            fprintf(handle, "        \"direction\": %d,\n", player[i].ent->direction);
+            fprintf(handle, "        \"attacking\": %d,\n", player[i].ent->attacking);
+            fprintf(handle, "        \"jumping\": %d,\n", player[i].ent->jumping);
+            fprintf(handle, "        \"falling\": %d,\n", player[i].ent->falling);
+            fprintf(handle, "        \"drop\": %d,\n", player[i].ent->drop);
+            fprintf(handle, "        \"inpain\": %d,\n", player[i].ent->inpain);
+            fprintf(handle, "        \"inbackpain\": %d,\n", player[i].ent->inbackpain);
+            fprintf(handle, "        \"running\": %d\n", player[i].ent->running);
+            fputs("      }\n", handle);
+        }
+        else
+        {
+            fputs("\n", handle);
+        }
+        fputs("    }", handle);
+    }
+    fputs("\n  ],\n", handle);
+
+    fputs("  \"active_entities\": [\n", handle);
+    if(ent_list)
+    {
+        int first_entity_written = 0;
+        for(i = 0; i < ent_list_size; i++)
+        {
+            entity *ent = ent_list[i];
+            if(!ent || !ent->exists)
+            {
+                continue;
+            }
+
+            if(first_entity_written > 0) fputs(",\n", handle);
+            fputs("    {\n", handle);
+            fprintf(handle, "      \"slot\": %d,\n", i);
+            fputs("      \"name\": ", handle);
+            hosted_json_write_escaped(handle, ent->name);
+            fputs(",\n", handle);
+            fputs("      \"model_name\": ", handle);
+            hosted_json_write_escaped(handle, ent->modeldata.name);
+            fputs(",\n", handle);
+            fprintf(handle, "      \"model_type\": %d,\n", ent->modeldata.type);
+            fprintf(handle, "      \"animnum\": %u,\n", ent->animnum);
+            fprintf(handle, "      \"animpos\": %u,\n", ent->animpos);
+            fprintf(handle, "      \"health\": %u,\n", ent->energy_state.health_current);
+            fprintf(handle, "      \"mp\": %u,\n", ent->energy_state.mp_current);
+            fprintf(handle, "      \"position\": {\"x\": %.3f, \"y\": %.3f, \"z\": %.3f},\n",
+                    ent->position.x, ent->position.y, ent->position.z);
+            fprintf(handle, "      \"velocity\": {\"x\": %.3f, \"y\": %.3f, \"z\": %.3f},\n",
+                    ent->velocity.x, ent->velocity.y, ent->velocity.z);
+            fprintf(handle, "      \"direction\": %d,\n", ent->direction);
+            fprintf(handle, "      \"owner_bound\": %d,\n", ent->owner ? 1 : 0);
+            fprintf(handle, "      \"parent_bound\": %d,\n", ent->parent ? 1 : 0);
+            fprintf(handle, "      \"owner_slot\": %d,\n", hosted_live_state_entity_slot(ent->owner));
+            fprintf(handle, "      \"parent_slot\": %d,\n", hosted_live_state_entity_slot(ent->parent));
+            fprintf(handle, "      \"opponent_slot\": %d,\n", hosted_live_state_entity_slot(ent->opponent));
+            fprintf(handle, "      \"weapon_slot\": %d,\n", hosted_live_state_entity_slot(ent->weapent));
+            fprintf(handle, "      \"projectile\": %d,\n", ent->projectile);
+            fprintf(handle, "      \"falling\": %d,\n", ent->falling);
+            fprintf(handle, "      \"drop\": %d,\n", ent->drop);
+            fprintf(handle, "      \"dying\": %u,\n", ent->dying);
+            fprintf(handle, "      \"death_state\": %d,\n", ent->death_state);
+            fprintf(handle, "      \"spawn_type\": %d,\n", ent->spawntype);
+            fprintf(handle, "      \"player_index\": %d,\n", ent->playerindex);
+            fprintf(handle, "      \"next_anim\": %lu,\n", ent->nextanim);
+            fprintf(handle, "      \"next_think\": %lu\n", ent->nextthink);
+            fputs("    }", handle);
+            ++first_entity_written;
+        }
+    }
+    fputs("\n  ]\n", handle);
+    fputs("}\n", handle);
+    fclose(handle);
+}
+
+static void hosted_live_state_write_boot_file(const char *manifest_path)
+{
+    char boot_path[MAX_BUFFER_LEN] = {0};
+    FILE *handle;
+    int i;
+    int active_entities = 0;
+
+    snprintf(boot_path, sizeof(boot_path), "%s.boot", manifest_path);
+    handle = fopen(boot_path, "w");
+    if(!handle) return;
+
+    fputs("OPENBOR_V2_LIVE_BOOT_V8\n", handle);
+    fprintf(handle, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.6f\t%.6f\t%u\t%llu\n",
+            current_set, current_level, current_stage, current_spawn, credits,
+            level ? level->pos : 0, level ? level->waiting : 0, _pause, advancex, advancey,
+            _time, (unsigned long long)getseed());
+    fprintf(handle, "%d\t%d\t%lu\t%d\t%d\n", groupmin, groupmax,
+            (unsigned long)(level ? level->advancetime : 0), timeleft, nextplan);
+    fprintf(handle, "%s\t%d\t%u\n", currentmusic, musicloop, musicoffset);
+    for(i = 0; i < MAX_PLAYERS; i++)
+    {
+        entity *ent = player[i].ent;
+        fprintf(handle, "%d\t%s\t%u\t%u\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%d\n",
+                ent ? 1 : 0, player[i].name, player[i].lives, player[i].credits, player[i].score,
+                player[i].colourmap, player[i].weapnum, player[i].spawnhealth, player[i].spawnmp,
+                ent ? ent->energy_state.health_current : 0, ent ? ent->energy_state.mp_current : 0,
+                ent ? ent->position.x : 0.f, ent ? ent->position.y : 0.f, ent ? ent->position.z : 0.f,
+                ent ? ent->velocity.x : 0.f, ent ? ent->velocity.y : 0.f, ent ? ent->velocity.z : 0.f,
+                ent ? ent->direction : 0);
+    }
+
+    if(ent_list)
+    {
+        for(i = 0; i < ent_list_size; i++)
+        {
+            if(ent_list[i] && ent_list[i]->exists) ++active_entities;
+        }
+    }
+    fprintf(handle, "%d\n", active_entities);
+    if(ent_list)
+    {
+        for(i = 0; i < ent_list_size; i++)
+        {
+            entity *ent = ent_list[i];
+            if(!ent || !ent->exists) continue;
+            fprintf(handle, "%d\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%u\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%u\t%d\t%d\t%d\t%d\t%u\t%d\t%lu\t%lu\t%lu\t%lu\t%lu\n",
+                    i, ent->modeldata.name, ent->modeldata.type, ent->playerindex,
+                    hosted_live_state_entity_slot(ent->owner), hosted_live_state_entity_slot(ent->parent),
+                    hosted_live_state_entity_slot(ent->opponent), hosted_live_state_entity_slot(ent->weapent),
+                    ent->energy_state.health_current, ent->energy_state.mp_current,
+                    ent->position.x, ent->position.y, ent->position.z,
+                    ent->velocity.x, ent->velocity.y, ent->velocity.z,
+                    ent->animnum, ent->animpos, ent->direction, ent->projectile,
+                    ent->falling, ent->drop, ent->dying, ent->death_state,
+                    ent->nextanim, ent->nextthink, ent->nextmove, ent->nextattack, ent->timestamp);
+            fprintf(handle, "%s\t%d\t%d\t%d\t%.9g\t%.9g\t%.9g\t%.9g\n",
+                    ent->defaultmodel ? ent->defaultmodel->name : ent->modeldata.name,
+                    ent->animating, ent->idling, ent->lifespancountdown,
+                    ent->speedmul, ent->base, ent->movex, ent->movez);
+            fprintf(handle, "%d\t%d\t%u\t%d\t%u\t%u\t%d\t%d\t%lu\t%lu\t%u\t%d\t%d\t%u\n",
+                    hosted_live_action_id(ent), ent->attacking, ent->charging,
+                    ent->running, ent->jumping, ent->tocost, ent->weapon_state,
+                    ent == smartbomber, ent->pausetime, ent->stalltime,
+                    ent->inpain, ent->rising, ent->ducking, ent->blocking);
+            fprintf(handle, "%u\n", ent->autokill);
+        }
+    }
+    fclose(handle);
+}
+
+/* Reuse OpenBOR's own script-save format so mod globals retain their semantics. */
+static void hosted_live_state_write_script_file(const char *manifest_path)
+{
+    char source_path[MAX_BUFFER_LEN] = {0};
+    char destination_path[MAX_BUFFER_LEN] = {0};
+    char pak_name[MAX_BUFFER_LEN] = {0};
+    FILE *source;
+    FILE *destination;
+    int byte;
+    size_t length;
+
+    if(!saveScriptFile()) return;
+    getBasePath(source_path, "Saves", 0);
+    getPakName(pak_name, 2);
+    strcat(source_path, pak_name);
+    length = strlen(source_path);
+    source_path[length - 2] = '0' + (current_set / 10);
+    source_path[length - 1] = '0' + (current_set % 10);
+    snprintf(destination_path, sizeof(destination_path), "%s.script", manifest_path);
+    source = fopen(source_path, "rb");
+    destination = fopen(destination_path, "wb");
+    if(!source || !destination)
+    {
+        if(source) fclose(source);
+        if(destination) fclose(destination);
+        return;
+    }
+    while((byte = fgetc(source)) != EOF) fputc(byte, destination);
+    fclose(source);
+    fclose(destination);
+}
+
+/* Entity script variables are mod-defined state. Persist only portable scalar
+ * values: raw pointers refer to the old process and cannot be restored safely. */
+static void hosted_live_state_write_entity_variable(FILE *handle, int slot, char scope,
+                                                    const char *key, ScriptVariant *value)
+{
+    const char *text;
+    const unsigned char *cursor;
+
+    if(!value || (value->vt != VT_INTEGER && value->vt != VT_DECIMAL && value->vt != VT_STR)) return;
+    fprintf(handle, "%d\t%c\t%s\t%c\t", slot, scope, key, value->vt == VT_INTEGER ? 'I' : value->vt == VT_DECIMAL ? 'D' : 'S');
+    if(value->vt == VT_INTEGER) fprintf(handle, "%d", value->lVal);
+    else if(value->vt == VT_DECIMAL) fprintf(handle, "%.17g", value->dblVal);
+    else
+    {
+        text = (const char *)StrCache_Get(value->strVal);
+        for(cursor = (const unsigned char *)(text ? text : ""); *cursor; ++cursor) fprintf(handle, "%02x", *cursor);
+    }
+    fputc('\n', handle);
+}
+
+static void hosted_live_state_write_entity_variables_file(const char *manifest_path)
+{
+    char path[MAX_BUFFER_LEN] = {0};
+    FILE *handle;
+    int slot;
+
+    snprintf(path, sizeof(path), "%s.entityvars", manifest_path);
+    handle = fopen(path, "w");
+    if(!handle) return;
+    fputs("OPENBOR_V2_LIVE_ENTITYVARS_V1\n", handle);
+    for(slot = 0; ent_list && slot < ent_list_size; ++slot)
+    {
+        entity *ent = ent_list[slot];
+        int index;
+        int named_count;
+        if(!ent || !ent->exists || !ent->varlist) continue;
+        named_count = List_GetSize(ent->varlist->list);
+        for(index = 0, List_Reset(ent->varlist->list); index < named_count; ++index)
+        {
+            hosted_live_state_write_entity_variable(handle, slot, 'N', List_GetName(ent->varlist->list),
+                                                    (ScriptVariant *)List_Retrieve(ent->varlist->list));
+            List_GotoNext(ent->varlist->list);
+        }
+        for(index = 0; index < ent->varlist->vars->lVal; ++index)
+        {
+            char key[32];
+            snprintf(key, sizeof(key), "%d", index);
+            hosted_live_state_write_entity_variable(handle, slot, 'I', key, ent->varlist->vars + index + 1);
+        }
+    }
+    fclose(handle);
+}
+
+static int hosted_live_state_decode_hex(const char *source, char *destination, size_t capacity)
+{
+    size_t length = strlen(source);
+    size_t i;
+    if((length & 1) || length / 2 + 1 > capacity) return 0;
+    for(i = 0; i < length; i += 2)
+    {
+        unsigned value;
+        if(sscanf(source + i, "%2x", &value) != 1) return 0;
+        destination[i / 2] = (char)value;
+    }
+    destination[length / 2] = '\0';
+    return 1;
+}
+
+static void hosted_live_state_restore_entity_variables_file(entity **restored_by_slot, int max_slot)
+{
+    const char *path = getenv("OPENBOR_V2_LIVESTATE_ENTITYVARS_PATH");
+    FILE *handle;
+    char header[64] = {0};
+    char line[MAX_BUFFER_LEN] = {0};
+
+    if(!path || !path[0] || !restored_by_slot || !(handle = fopen(path, "r"))) return;
+    if(!fgets(header, sizeof(header), handle) || strcmp(header, "OPENBOR_V2_LIVE_ENTITYVARS_V1\n"))
+    {
+        fclose(handle);
+        return;
+    }
+    while(fgets(line, sizeof(line), handle))
+    {
+        char *save = NULL;
+        char *slot_text = strtok_r(line, "\t\n", &save);
+        char *scope = strtok_r(NULL, "\t\n", &save);
+        char *key = strtok_r(NULL, "\t\n", &save);
+        char *type = strtok_r(NULL, "\t\n", &save);
+        char *value_text = strtok_r(NULL, "\t\n", &save);
+        int slot;
+        entity *ent;
+        ScriptVariant value;
+        if(!slot_text || !scope || !key || !type || !value_text || sscanf(slot_text, "%d", &slot) != 1 ||
+           slot < 0 || slot > max_slot || !(ent = restored_by_slot[slot]) || !ent->varlist) continue;
+        ScriptVariant_Init(&value);
+        if(type[0] == 'I')
+        {
+            ScriptVariant_ChangeType(&value, VT_INTEGER);
+            value.lVal = strtol(value_text, NULL, 10);
+        }
+        else if(type[0] == 'D')
+        {
+            ScriptVariant_ChangeType(&value, VT_DECIMAL);
+            value.dblVal = strtod(value_text, NULL);
+        }
+        else if(type[0] == 'S')
+        {
+            char text[MAX_BUFFER_LEN] = {0};
+            if(!hosted_live_state_decode_hex(value_text, text, sizeof(text))) continue;
+            ScriptVariant_ChangeType(&value, VT_STR);
+            value.strVal = StrCache_CreateNewFrom(text);
+        }
+        else continue;
+        if(scope[0] == 'N') Varlist_SetByName(ent->varlist, key, &value);
+        else if(scope[0] == 'I') Varlist_SetByIndex(ent->varlist, atoi(key), &value);
+        ScriptVariant_Clear(&value);
+    }
+    fclose(handle);
+}
+
+static int hosted_live_state_load_boot_file(void)
+{
+    const char *path = getenv("OPENBOR_V2_LIVESTATE_BOOT_PATH");
+    FILE *handle;
+    char header[64] = {0};
+    char line[MAX_BUFFER_LEN] = {0};
+    int i;
+    s_savelevel *save;
+
+    if(hosted_live_boot_state.loaded) return hosted_live_boot_state.set >= 0;
+    hosted_live_boot_state.loaded = 1;
+    hosted_live_boot_state.set = -1;
+    if(!path || !path[0] || !(handle = fopen(path, "r"))) return 0;
+    if(!fgets(header, sizeof(header), handle) ||
+       (strcmp(header, "OPENBOR_V2_LIVE_BOOT_V6\n") && strcmp(header, "OPENBOR_V2_LIVE_BOOT_V7\n") && strcmp(header, "OPENBOR_V2_LIVE_BOOT_V8\n")) ||
+       !fgets(line, sizeof(line), handle) ||
+       sscanf(line, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%f\t%f\t%u\t%llu",
+              &hosted_live_boot_state.set, &hosted_live_boot_state.level_index,
+              &hosted_live_boot_state.stage, &hosted_live_boot_state.spawn,
+              &hosted_live_boot_state.credits, &hosted_live_boot_state.level_pos,
+              &hosted_live_boot_state.level_waiting, &hosted_live_boot_state.paused, &hosted_live_boot_state.advance_x,
+              &hosted_live_boot_state.advance_y, &hosted_live_boot_state.elapsed_time,
+              &hosted_live_boot_state.random_seed) != 12 ||
+       hosted_live_boot_state.set < 0 || hosted_live_boot_state.set >= num_difficulties)
+    {
+        fclose(handle);
+        hosted_live_boot_state.set = -1;
+        return 0;
+    }
+    hosted_live_boot_state.version = !strcmp(header, "OPENBOR_V2_LIVE_BOOT_V8\n") ? 8 : (!strcmp(header, "OPENBOR_V2_LIVE_BOOT_V7\n") ? 7 : 6);
+    if(!fgets(line, sizeof(line), handle) ||
+       sscanf(line, "%d\t%d\t%lu\t%d\t%d",
+              &hosted_live_boot_state.spawn_group_min, &hosted_live_boot_state.spawn_group_max,
+              &hosted_live_boot_state.advance_time, &hosted_live_boot_state.time_left,
+              &hosted_live_boot_state.next_plan) != 5 ||
+       hosted_live_boot_state.spawn_group_min < 1 || hosted_live_boot_state.spawn_group_max < 1)
+    {
+        fclose(handle);
+        hosted_live_boot_state.set = -1;
+        return 0;
+    }
+    if(!fgets(line, sizeof(line), handle) ||
+       sscanf(line, "%1015[^\t]\t%d\t%u", hosted_live_boot_state.music_name,
+              &hosted_live_boot_state.music_loop, &hosted_live_boot_state.music_offset) != 3)
+    {
+        fclose(handle);
+        hosted_live_boot_state.set = -1;
+        return 0;
+    }
+    for(i = 0; i < MAX_PLAYERS; i++)
+    {
+        if(!fgets(line, sizeof(line), handle) ||
+           sscanf(line, "%d\t%63[^\t]\t%u\t%u\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%f\t%f\t%f\t%f\t%f\t%f\t%d",
+                  &hosted_live_boot_state.player_state[i].active, hosted_live_boot_state.player_state[i].name,
+                  &hosted_live_boot_state.player_state[i].lives, &hosted_live_boot_state.player_state[i].credits,
+                  &hosted_live_boot_state.player_state[i].score, &hosted_live_boot_state.player_state[i].colourmap,
+                  &hosted_live_boot_state.player_state[i].weapon, &hosted_live_boot_state.player_state[i].spawnhealth,
+                  &hosted_live_boot_state.player_state[i].spawnmp, &hosted_live_boot_state.player_state[i].health,
+                  &hosted_live_boot_state.player_state[i].mp, &hosted_live_boot_state.player_state[i].x,
+                  &hosted_live_boot_state.player_state[i].y, &hosted_live_boot_state.player_state[i].z,
+                  &hosted_live_boot_state.player_state[i].velocity_x, &hosted_live_boot_state.player_state[i].velocity_y,
+                  &hosted_live_boot_state.player_state[i].velocity_z, &hosted_live_boot_state.player_state[i].direction) != 18)
+        {
+            fclose(handle);
+            hosted_live_boot_state.set = -1;
+           return 0;
+        }
+    }
+    if(!fgets(line, sizeof(line), handle) || sscanf(line, "%d", &hosted_live_boot_state.entity_count) != 1 ||
+       hosted_live_boot_state.entity_count < 0 || hosted_live_boot_state.entity_count > maxentities)
+    {
+        fclose(handle);
+        hosted_live_boot_state.set = -1;
+        return 0;
+    }
+    if(hosted_live_boot_state.entity_count)
+    {
+        hosted_live_boot_state.entities = calloc(hosted_live_boot_state.entity_count, sizeof(*hosted_live_boot_state.entities));
+        if(!hosted_live_boot_state.entities)
+        {
+            fclose(handle);
+            hosted_live_boot_state.set = -1;
+            return 0;
+        }
+    }
+    for(i = 0; i < hosted_live_boot_state.entity_count; i++)
+    {
+        s_hosted_live_entity_boot *state = hosted_live_boot_state.entities + i;
+        if(!fgets(line, sizeof(line), handle) ||
+           sscanf(line, "%d\t%63[^\t]\t%d\t%d\t%d\t%d\t%d\t%d\t%u\t%u\t%f\t%f\t%f\t%f\t%f\t%f\t%u\t%u\t%d\t%d\t%d\t%d\t%u\t%d\t%lu\t%lu\t%lu\t%lu\t%lu",
+                  &state->slot, state->model_name, &state->model_type, &state->player_index,
+                  &state->owner_slot, &state->parent_slot, &state->opponent_slot, &state->weapon_slot,
+                  &state->health, &state->mp, &state->x, &state->y, &state->z,
+                  &state->velocity_x, &state->velocity_y, &state->velocity_z,
+                  &state->animnum, &state->animpos, &state->direction, &state->projectile,
+                  &state->falling, &state->drop, &state->dying, &state->death_state,
+                  &state->nextanim, &state->nextthink, &state->nextmove, &state->nextattack,
+                  &state->timestamp) != 29 ||
+           !fgets(line, sizeof(line), handle) ||
+           sscanf(line, "%63[^\t]\t%d\t%d\t%d\t%f\t%f\t%f\t%f",
+                  state->default_model_name,
+                  &state->animating, &state->idling, &state->lifespan_countdown,
+                  &state->speed_multiplier, &state->base, &state->move_x, &state->move_z) != 8 ||
+           state->slot < 0 || state->slot >= maxentities)
+        {
+            fclose(handle);
+            free(hosted_live_boot_state.entities);
+            hosted_live_boot_state.entities = NULL;
+            hosted_live_boot_state.entity_count = 0;
+            hosted_live_boot_state.set = -1;
+            return 0;
+        }
+        if(hosted_live_boot_state.version >= 7)
+        {
+            if(!fgets(line, sizeof(line), handle) ||
+               sscanf(line, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%lu\t%lu\t%d\t%d\t%d\t%d",
+                      &state->action_id, &state->attacking, &state->charging,
+                      &state->running, &state->jumping, &state->tocost, &state->weapon_state,
+                      &state->smartbomb, &state->pausetime, &state->stalltime,
+                      &state->inpain, &state->rising, &state->ducking, &state->blocking) != 14 ||
+               state->action_id < -1 || state->action_id >= (int)(sizeof(hosted_live_actions) / sizeof(*hosted_live_actions)))
+            {
+                fclose(handle);
+                free(hosted_live_boot_state.entities);
+                hosted_live_boot_state.entities = NULL;
+                hosted_live_boot_state.entity_count = 0;
+                hosted_live_boot_state.set = -1;
+                return 0;
+            }
+            state->has_action_state = 1;
+        }
+        if(hosted_live_boot_state.version >= 8)
+        {
+            if(!fgets(line, sizeof(line), handle) || sscanf(line, "%u", &state->autokill) != 1)
+            {
+                fclose(handle);
+                free(hosted_live_boot_state.entities);
+                hosted_live_boot_state.entities = NULL;
+                hosted_live_boot_state.entity_count = 0;
+                hosted_live_boot_state.set = -1;
+                return 0;
+            }
+            state->has_lifecycle_state = 1;
+        }
+    }
+    fclose(handle);
+    save = savelevel + hosted_live_boot_state.set;
+    writeToLogFile("[live-state] parsed boot: entities=%d limit=%d\n",
+                   hosted_live_boot_state.entity_count, maxentities);
+    memset(save, 0, sizeof(*save));
+    save->compatibleversion = CV_SAVED_GAME;
+    save->level = hosted_live_boot_state.level_index;
+    save->stage = hosted_live_boot_state.stage;
+    save->credits = hosted_live_boot_state.credits;
+    save->which_set = hosted_live_boot_state.set;
+    save->flag = 2;
+    strncpy(save->dName, levelsets[hosted_live_boot_state.set].name, MAX_NAME_LEN - 1);
+    for(i = 0; i < MAX_PLAYERS; i++)
+    {
+        save->pLives[i] = hosted_live_boot_state.player_state[i].lives;
+        save->pCredits[i] = hosted_live_boot_state.player_state[i].credits;
+        save->pScores[i] = hosted_live_boot_state.player_state[i].score;
+        save->pColourmap[i] = hosted_live_boot_state.player_state[i].colourmap;
+        save->pWeapnum[i] = hosted_live_boot_state.player_state[i].weapon;
+        save->pSpawnhealth[i] = hosted_live_boot_state.player_state[i].spawnhealth;
+        save->pSpawnmp[i] = hosted_live_boot_state.player_state[i].spawnmp;
+        strncpy(save->pName[i], hosted_live_boot_state.player_state[i].name, MAX_NAME_LEN - 1);
+    }
+    hosted_live_state_restore_script_file();
+    return 1;
+}
+
+static void hosted_live_state_restore_script_file(void)
+{
+    const char *source_path = getenv("OPENBOR_V2_LIVESTATE_SCRIPT_PATH");
+    char destination_path[MAX_BUFFER_LEN] = {0};
+    char pak_name[MAX_BUFFER_LEN] = {0};
+    FILE *source;
+    FILE *destination;
+    int byte;
+    size_t length;
+
+    if(!source_path || !source_path[0]) return;
+    source = fopen(source_path, "rb");
+    if(!source) return;
+    getBasePath(destination_path, "Saves", 0);
+    getPakName(pak_name, 2);
+    strcat(destination_path, pak_name);
+    length = strlen(destination_path);
+    destination_path[length - 2] = '0' + (hosted_live_boot_state.set / 10);
+    destination_path[length - 1] = '0' + (hosted_live_boot_state.set % 10);
+    destination = fopen(destination_path, "wb");
+    if(!destination)
+    {
+        fclose(source);
+        return;
+    }
+    while((byte = fgetc(source)) != EOF) fputc(byte, destination);
+    fclose(source);
+    fclose(destination);
+}
+
+static void hosted_live_state_restore_entity_action(entity *ent, const s_hosted_live_entity_boot *state)
+{
+    if(state->has_action_state)
+    {
+        if(state->action_id >= 0) ent->takeaction = hosted_live_actions[state->action_id];
+        ent->attacking = state->attacking;
+        ent->charging = state->charging;
+        ent->running = state->running;
+        ent->jumping = state->jumping;
+        ent->tocost = state->tocost;
+        ent->weapon_state = state->weapon_state;
+        ent->pausetime = state->pausetime;
+        ent->stalltime = state->stalltime;
+        ent->inpain = state->inpain;
+        ent->rising = state->rising;
+        ent->ducking = state->ducking;
+        ent->blocking = state->blocking;
+        if(state->smartbomb) smartbomber = ent;
+        return;
+    }
+    /* V6 had frames but no finishing routine. Recover common player actions
+     * without restarting their animation or replaying frame scripts. */
+    if(!(ent->modeldata.type & TYPE_PLAYER)) return;
+    if(ent->animnum == ANI_SPAWN || ent->animnum == ANI_RESPAWN) ent->takeaction = common_spawn;
+    else if(state->falling) ent->takeaction = common_fall;
+    else if(ent->animnum == ANI_IDLE || ent->animnum == ANI_WALK || ent->animnum == ANI_RUN)
+        ent->takeaction = NULL;
+    else if(!state->idling)
+    {
+        ent->takeaction = common_attack_proc;
+        ent->attacking = ATTACKING_ACTIVE;
+    }
+}
+
+static entity *hosted_live_state_spawn_entity(s_hosted_live_entity_boot *state)
+{
+    entity *ent = spawn(state->x, state->z, state->y, state->direction,
+                        state->default_model_name, MODEL_INDEX_NONE, NULL);
+    if(ent && ent->modeldata.type != state->model_type)
+    {
+        /* Weapon models may be TYPE_NONE in the PAK, while their live entity
+         * remains a player. Restore its effective type and behavior together. */
+        ent->modeldata.type = state->model_type;
+        ent_default_init(ent);
+    }
+    if(ent && strcmp(ent->modeldata.name, state->model_name))
+    {
+        /* Reapply the current weapon/model through the normal inheritance
+         * path. weaponframe 0 must still return to the saved base model. */
+        set_model_ex(ent, state->model_name, MODEL_INDEX_NONE, NULL, 0);
+    }
+    return ent;
+}
+
+static void hosted_live_state_restore_entity_progress(entity *ent, const s_hosted_live_entity_boot *state)
+{
+    /* Selecting an animation initializes it as playing and spawn() resets
+     * lifespan. Restore these after selection, including stopped animations. */
+    ent->animating = state->animating;
+    ent->idling = state->idling;
+    ent->lifespancountdown = state->lifespan_countdown;
+    ent->speedmul = state->speed_multiplier;
+    ent->base = state->base;
+    ent->movex = state->move_x;
+    ent->movez = state->move_z;
+    if(state->has_lifecycle_state) ent->autokill = state->autokill;
+}
+
+static void hosted_live_state_restore_music(void)
+{
+    if(!hosted_live_boot_state.music_name[0]) return;
+    /* Rewind keeps the live decoder when the song is unchanged. The stored
+     * offset is a loop-start offset, not the current playback position. */
+    if(hosted_rewind_restoring && !strcmp(currentmusic, hosted_live_boot_state.music_name) && sound_query_music(NULL, NULL))
+    {
+        writeToLogFile("[rewind] retained music '%s'\n", currentmusic);
+        return;
+    }
+    music(hosted_live_boot_state.music_name, hosted_live_boot_state.music_loop, hosted_live_boot_state.music_offset);
+}
+
+static void hosted_live_state_apply_boot_after_level_load(void)
+{
+    int i;
+    int max_slot = -1;
+    entity **restored_by_slot = NULL;
+    if(!hosted_live_boot_state.loaded || hosted_live_boot_state.set < 0 ||
+       hosted_live_boot_state.set != current_set || hosted_live_boot_state.level_index != current_level ||
+       hosted_live_boot_state.applied || !level) return;
+    hosted_live_boot_state.applied = 1;
+    hosted_live_resume_pause_requested = hosted_live_boot_state.paused != 0;
+    current_stage = hosted_live_boot_state.stage;
+    current_spawn = hosted_live_boot_state.spawn;
+    credits = hosted_live_boot_state.credits;
+    _time = hosted_live_boot_state.elapsed_time;
+    srand32(hosted_live_boot_state.random_seed);
+    advancex = hosted_live_boot_state.advance_x;
+    advancey = hosted_live_boot_state.advance_y;
+    level->pos = hosted_live_boot_state.level_pos;
+    level->waiting = hosted_live_boot_state.level_waiting;
+    groupmin = hosted_live_boot_state.spawn_group_min;
+    groupmax = hosted_live_boot_state.spawn_group_max;
+    level->advancetime = hosted_live_boot_state.advance_time;
+    timeleft = hosted_live_boot_state.time_left;
+    nextplan = hosted_live_boot_state.next_plan;
+    smartbomber = NULL;
+    writeToLogFile("[live-state] restored wave: spawn=%d group=%d/%d time=%u advance_time=%lu\n",
+                   current_spawn, groupmin, groupmax, _time, hosted_live_boot_state.advance_time);
+    hosted_live_state_restore_music();
+
+    /* playlevel() has already spawned its default entities. They belong to a
+     * fresh level start, not to this captured frame. Keep its player slots,
+     * but return every other pool entry so the saved entity list is exact. */
+    for(i = 0; ent_list && i < ent_list_size; ++i)
+    {
+        entity *ent = ent_list[i];
+        if(!ent || !ent->exists || (!hosted_rewind_restoring && (ent->modeldata.type & TYPE_PLAYER))) continue;
+        ent_unlink(ent);
+        ent->owner = NULL;
+        ent->parent = NULL;
+        ent->opponent = NULL;
+        ent->weapent = NULL;
+        ent->exists = 0;
+        if(ent_count > 0) --ent_count;
+    }
+
+    if(hosted_rewind_restoring)
+    {
+        firstplayer = stalker = NULL;
+        for(i = 0; i < MAX_PLAYERS; ++i)
+        {
+            player[i].ent = NULL;
+            player[i].lives = hosted_live_boot_state.player_state[i].lives;
+            player[i].credits = hosted_live_boot_state.player_state[i].credits;
+            player[i].score = hosted_live_boot_state.player_state[i].score;
+            player[i].colourmap = hosted_live_boot_state.player_state[i].colourmap;
+            player[i].weapnum = hosted_live_boot_state.player_state[i].weapon;
+            player[i].spawnhealth = hosted_live_boot_state.player_state[i].spawnhealth;
+            player[i].spawnmp = hosted_live_boot_state.player_state[i].spawnmp;
+            strncpy(player[i].name, hosted_live_boot_state.player_state[i].name, MAX_NAME_LEN - 1);
+            player[i].joining = 0;
+            player[i].hasplayed = 1;
+        }
+    }
+
+    for(i = 0; i < MAX_PLAYERS; i++)
+    {
+        entity *ent = player[i].ent;
+        if(!ent || !hosted_live_boot_state.player_state[i].active) continue;
+        ent->energy_state.health_current = hosted_live_boot_state.player_state[i].health;
+        ent->energy_state.mp_current = hosted_live_boot_state.player_state[i].mp;
+        ent->position.x = hosted_live_boot_state.player_state[i].x;
+        ent->position.y = hosted_live_boot_state.player_state[i].y;
+        ent->position.z = hosted_live_boot_state.player_state[i].z;
+        ent->velocity.x = hosted_live_boot_state.player_state[i].velocity_x;
+        ent->velocity.y = hosted_live_boot_state.player_state[i].velocity_y;
+        ent->velocity.z = hosted_live_boot_state.player_state[i].velocity_z;
+        ent->direction = hosted_live_boot_state.player_state[i].direction;
+    }
+
+    for(i = 0; i < hosted_live_boot_state.entity_count; i++)
+    {
+        if(hosted_live_boot_state.entities[i].slot > max_slot) max_slot = hosted_live_boot_state.entities[i].slot;
+    }
+    if(max_slot >= 0)
+    {
+        restored_by_slot = calloc(max_slot + 1, sizeof(*restored_by_slot));
+    }
+    for(i = 0; i < hosted_live_boot_state.entity_count; i++)
+    {
+        s_hosted_live_entity_boot *state = hosted_live_boot_state.entities + i;
+        entity *ent = NULL;
+        if(state->model_type & TYPE_PLAYER)
+        {
+            if(state->player_index >= 0 && state->player_index < MAX_PLAYERS)
+            {
+                if(hosted_rewind_restoring)
+                {
+                    currentspawnplayer = state->player_index;
+                    player[state->player_index].ent = hosted_live_state_spawn_entity(state);
+                }
+                ent = player[state->player_index].ent;
+            }
+        }
+        else
+        {
+            ent = hosted_live_state_spawn_entity(state);
+        }
+        if(!ent) continue;
+        if(hosted_rewind_restoring && (state->model_type & TYPE_PLAYER)) ent->playerindex = state->player_index;
+        ent->energy_state.health_current = state->health;
+        ent->energy_state.mp_current = state->mp;
+        ent->position.x = state->x;
+        ent->position.y = state->y;
+        ent->position.z = state->z;
+        ent->velocity.x = state->velocity_x;
+        ent->velocity.y = state->velocity_y;
+        ent->velocity.z = state->velocity_z;
+        ent->direction = state->direction;
+        ent->projectile = state->projectile;
+        ent->falling = state->falling;
+        ent->drop = state->drop;
+        ent->dying = state->dying;
+        ent->death_state = state->death_state;
+        if(validanim(ent, state->animnum))
+        {
+            ent_set_anim(ent, state->animnum, 0);
+            ent->animpos = state->animpos;
+        }
+        /* spawn() selects common_spawn even when the saved animation is an
+         * ordinary looping idle. That routine would block controls forever. */
+        if(ent->takeaction == common_spawn &&
+           ent->animnum != ANI_SPAWN && ent->animnum != ANI_RESPAWN)
+        {
+            ent->takeaction = NULL;
+            ent->idling = IDLING_PREPARED;
+        }
+        hosted_live_state_restore_entity_progress(ent, state);
+        hosted_live_state_restore_entity_action(ent, state);
+        ent->nextanim = state->nextanim;
+        ent->nextthink = state->nextthink;
+        ent->nextmove = state->nextmove;
+        ent->nextattack = state->nextattack;
+        ent->timestamp = state->timestamp;
+        if(restored_by_slot && state->slot >= 0 && state->slot <= max_slot)
+            restored_by_slot[state->slot] = ent;
+    }
+    for(i = 0; i < hosted_live_boot_state.entity_count; i++)
+    {
+        s_hosted_live_entity_boot *state = hosted_live_boot_state.entities + i;
+        entity *ent = restored_by_slot && state->slot >= 0 && state->slot <= max_slot ? restored_by_slot[state->slot] : NULL;
+        if(!ent) continue;
+        if(state->owner_slot >= 0 && state->owner_slot <= max_slot) ent->owner = restored_by_slot[state->owner_slot];
+        if(state->parent_slot >= 0 && state->parent_slot <= max_slot) ent->parent = restored_by_slot[state->parent_slot];
+        if(state->weapon_slot >= 0 && state->weapon_slot <= max_slot) ent->weapent = restored_by_slot[state->weapon_slot];
+    }
+
+    /* Native level/model initialization can replace script state. Reapply
+     * the captured globals only after the complete entity graph is rebuilt. */
+    if(getenv("OPENBOR_V2_LIVESTATE_SCRIPT_PATH"))
+    {
+        hosted_live_state_restore_script_file();
+        if(!loadScriptFile())
+            borShutdown(1, "Live state: unable to restore captured script globals.\n");
+    }
+    hosted_live_state_restore_entity_variables_file(restored_by_slot, max_slot);
+    hosted_live_rebuilding_entities = 0;
+
+    /* Host key presses belong to the current process, not to the capture. */
+    for(i = 0; i < MAX_PLAYERS; i++)
+    {
+        entity *ent = player[i].ent;
+        if(!ent) continue;
+        player[i].keys = 0;
+        player[i].newkeys = 0;
+        player[i].playkeys = 0;
+        player[i].releasekeys = 0;
+        player[i].disablekeys = 0;
+        player[i].prevkeys = 0;
+    }
+    free(restored_by_slot);
+    free(hosted_live_boot_state.entities);
+    hosted_live_boot_state.entities = NULL;
+    hosted_live_boot_state.entity_count = 0;
+}
+
+/* A bounded, session-local checkpoint history. Import on the engine thread,
+ * never from a host timer or while scripts are executing. Level transitions
+ * discard history because the active level/model resources have changed. */
+static int hosted_rewind_update(int ingame)
+{
+    enum { HISTORY = 30 };
+    static int count, next, previous_set = -1, previous_level = -1;
+    static int completed[HISTORY], finish_requested[HISTORY], gameover_requested[HISTORY];
+    static unsigned go_ticks[HISTORY], neon_ticks[HISTORY];
+    static u64 last_capture, sequence, identifiers[HISTORY];
+    static unsigned captured_time[HISTORY];
+    static void *music_checkpoints[HISTORY];
+    /* Background motion uses its own clock. Leaving traveltime in the future
+     * makes unsigned (_time - traveltime) overflow on the next update. */
+    static struct {
+        int travel, text, time, gfx_offset;
+        float background, vertical, dx, dy, minx, maxx, minz, maxz, blockade;
+        float scrollspeed, bgspeed, vbgspeed;
+        float fade_step, fade_volume;
+        int music_volume;
+        char pending_music[MAX_BUFFER_LEN];
+    } motion[HISTORY];
+    const char *command = getenv("OPENBOR_V2_REWIND_COMMAND_PATH");
+    const char *directory = getenv("OPENBOR_V2_REWIND_DIRECTORY");
+    const char *keys[] = {"OPENBOR_V2_LIVESTATE_BOOT_PATH", "OPENBOR_V2_LIVESTATE_SCRIPT_PATH", "OPENBOR_V2_LIVESTATE_ENTITYVARS_PATH"};
+    const char *suffix[] = {".boot", ".script", ".entityvars"};
+    char path[MAX_BUFFER_LEN], sidecar[MAX_BUFFER_LEN], index_path[MAX_BUFFER_LEN], temporary[MAX_BUFFER_LEN];
+    char selection_path[MAX_BUFFER_LEN], result_path[MAX_BUFFER_LEN];
+    FILE *handle;
+    int enabled = 0, unused = 0, i, valid, offset = -1, selected = -1;
+    unsigned long long requested = 0;
+    u64 now = timer_uticks();
+    char *saved_env[3];
+    s_savelevel saved_level;
+    if(!command || !directory) return 0;
+    if((handle = fopen(command, "r")))
+    {
+        if(fscanf(handle, "%d %d", &enabled, &unused) != 2) enabled = 0;
+        fclose(handle);
+    }
+    snprintf(selection_path, sizeof(selection_path), "%s/selection.txt", directory);
+    snprintf(result_path, sizeof(result_path), "%s/result.txt", directory);
+    snprintf(index_path, sizeof(index_path), "%s/index.txt", directory);
+    if((handle = fopen(selection_path, "r")))
+    {
+        if(fscanf(handle, "%llu", &requested) != 1) requested = 0;
+        fclose(handle);
+        remove(selection_path);
+    }
+    if(!enabled || ingame != 1 || !level || _pause || current_set < 0)
+    {
+        for(i = 0; i < HISTORY; ++i) { free(music_checkpoints[i]); music_checkpoints[i] = NULL; }
+        if(count) remove(index_path);
+        count = next = 0;
+        last_capture = 0;
+        goto unavailable;
+    }
+    if(previous_set != current_set || previous_level != current_level)
+    {
+        for(i = 0; i < HISTORY; ++i) { free(music_checkpoints[i]); music_checkpoints[i] = NULL; }
+        count = next = 0;
+        previous_set = current_set;
+        previous_level = current_level;
+        last_capture = now;
+        remove(index_path);
+    }
+    if(!requested)
+    {
+        if(hosted_quick_menu_paused()) return 0;
+        if(now - last_capture < 500000) return 0;
+        snprintf(path, sizeof(path), "%s/frame-%02d", directory, next);
+        hosted_live_state_write_boot_file(path);
+        hosted_live_state_write_script_file(path);
+        hosted_live_state_write_entity_variables_file(path);
+        completed[next] = level_completed;
+        finish_requested[next] = level->force_finishlevel;
+        gameover_requested[next] = level->force_gameover;
+        go_ticks[next] = go_time;
+        neon_ticks[next] = neon_time;
+        motion[next].travel = traveltime;
+        motion[next].text = texttime;
+        motion[next].time = timevar;
+        motion[next].gfx_offset = gfx_y_offset;
+        motion[next].background = bgtravelled;
+        motion[next].vertical = vbgtravelled;
+        motion[next].dx = scrolldx;
+        motion[next].dy = scrolldy;
+        motion[next].minx = scrollminx;
+        motion[next].maxx = scrollmaxx;
+        motion[next].minz = scrollminz;
+        motion[next].maxz = scrollmaxz;
+        motion[next].blockade = blockade;
+        motion[next].scrollspeed = level->scrollspeed;
+        motion[next].bgspeed = level->bgspeed;
+        motion[next].vbgspeed = level->vbgspeed;
+        motion[next].fade_step = musicfade[0];
+        motion[next].fade_volume = musicfade[1];
+        motion[next].music_volume = sound_get_music_volume();
+        free(music_checkpoints[next]);
+        music_checkpoints[next] = sound_capture_music_checkpoint();
+        snprintf(motion[next].pending_music, MAX_BUFFER_LEN, "%s", musicname);
+        identifiers[next] = ++sequence;
+        captured_time[next] = _time;
+        /* The bridge pixels are the last fully rendered simulation frame,
+         * matching the state at the beginning of this update. */
+        {
+            const char *sources[] = {getenv("OPENBOR_V2_FRAME_PATH"), getenv("OPENBOR_V2_FRAMEINFO_PATH")};
+            const char *extensions[] = {".preview", ".info"};
+            char buffer[16384];
+            size_t length;
+            for(i = 0; i < 2; ++i)
+            {
+                FILE *source = sources[i] ? fopen(sources[i], "rb") : NULL;
+                FILE *destination;
+                snprintf(sidecar, sizeof(sidecar), "%s%s", path, extensions[i]);
+                destination = source ? fopen(sidecar, "wb") : NULL;
+                if(source && destination)
+                    while((length = fread(buffer, 1, sizeof(buffer), source))) fwrite(buffer, 1, length, destination);
+                if(source) fclose(source);
+                if(destination) fclose(destination);
+            }
+        }
+        next = (next + 1) % HISTORY;
+        if(count < HISTORY) ++count;
+        last_capture = now;
+        goto publish_index;
+    }
+    for(i = 0; i < count; ++i)
+    {
+        int slot = (next + HISTORY - 1 - i) % HISTORY;
+        if(identifiers[slot] == requested) { selected = slot; offset = i; break; }
+    }
+    if(selected < 0) goto unavailable;
+    snprintf(path, sizeof(path), "%s/frame-%02d", directory, selected);
+    for(i = 0; i < 3; ++i)
+    {
+        const char *old = getenv(keys[i]);
+        saved_env[i] = old ? strdup(old) : NULL;
+        snprintf(sidecar, sizeof(sidecar), "%s%s", path, suffix[i]);
+        setenv(keys[i], sidecar, 1);
+    }
+    saved_level = savelevel[current_set];
+    free(hosted_live_boot_state.entities);
+    memset(&hosted_live_boot_state, 0, sizeof(hosted_live_boot_state));
+    valid = hosted_live_state_load_boot_file();
+    if(valid && hosted_live_boot_state.set == current_set && hosted_live_boot_state.level_index == current_level)
+    {
+        hosted_rewind_restoring = hosted_live_rebuilding_entities = 1;
+        hosted_live_state_apply_boot_after_level_load();
+        level_completed = completed[selected];
+        level->force_finishlevel = finish_requested[selected];
+        level->force_gameover = gameover_requested[selected];
+        go_time = go_ticks[selected];
+        neon_time = neon_ticks[selected];
+        traveltime = motion[selected].travel;
+        texttime = motion[selected].text;
+        timevar = motion[selected].time;
+        gfx_y_offset = motion[selected].gfx_offset;
+        bgtravelled = motion[selected].background;
+        vbgtravelled = motion[selected].vertical;
+        scrolldx = motion[selected].dx;
+        scrolldy = motion[selected].dy;
+        scrollminx = motion[selected].minx;
+        scrollmaxx = motion[selected].maxx;
+        scrollminz = motion[selected].minz;
+        scrollmaxz = motion[selected].maxz;
+        blockade = motion[selected].blockade;
+        level->scrollspeed = motion[selected].scrollspeed;
+        level->bgspeed = motion[selected].bgspeed;
+        level->vbgspeed = motion[selected].vbgspeed;
+        musicfade[0] = motion[selected].fade_step;
+        musicfade[1] = motion[selected].fade_volume;
+        snprintf(musicname, sizeof(musicname), "%s", motion[selected].pending_music);
+        musicloop = hosted_live_boot_state.music_loop;
+        musicoffset = hosted_live_boot_state.music_offset;
+        sound_volume_music(motion[selected].music_volume, motion[selected].music_volume);
+        if(music_checkpoints[selected])
+            writeToLogFile("[rewind] music checkpoint restored=%d\n", sound_restore_music_checkpoint(music_checkpoints[selected]));
+        hosted_rewind_restoring = 0;
+        hosted_live_resume_pause_requested = 0;
+        sound_stopall_sample();
+        sound_pause_music(hosted_quick_menu_paused());
+    }
+    else valid = 0;
+    savelevel[current_set] = saved_level;
+    for(i = 0; i < 3; ++i)
+    {
+        if(saved_env[i]) { setenv(keys[i], saved_env[i], 1); free(saved_env[i]); }
+        else unsetenv(keys[i]);
+    }
+    if(!valid) goto unavailable;
+    next = selected;
+    count -= offset + 1;
+    last_capture = now;
+    if((handle = fopen(result_path, "w"))) { fprintf(handle, "ok %llu\n", requested); fclose(handle); }
+publish_index:
+    snprintf(temporary, sizeof(temporary), "%s.tmp", index_path);
+    if((handle = fopen(temporary, "w")))
+    {
+        fprintf(handle, "%u %d\n", _time, GAME_SPEED);
+        for(i = 0; i < count; ++i)
+        {
+            int slot = (next + HISTORY - 1 - i) % HISTORY;
+            fprintf(handle, "%llu %d %u\n", (unsigned long long)identifiers[slot], slot, captured_time[slot]);
+        }
+        fclose(handle);
+        rename(temporary, index_path);
+    }
+    return requested != 0;
+unavailable:
+    if(requested && (handle = fopen(result_path, "w"))) { fprintf(handle, "error %llu\n", requested); fclose(handle); }
+    return 0;
+}
+
+/* Store relationships by pool slot: raw pointers are never portable across runs. */
+static int hosted_live_state_entity_slot(const entity *needle)
+{
+    int i;
+
+    if(!needle || !ent_list)
+    {
+        return -1;
+    }
+
+    for(i = 0; i < ent_list_size; i++)
+    {
+        if(ent_list[i] == needle)
+        {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
 void tryvictorypose(entity *ent)
 {
     if( ent &&
@@ -47153,6 +48857,10 @@ static void check_victory_pose()
 int playlevel(char *filename)
 {
     int i, type, p_alive = 0;
+    int restoring_live_state = hosted_live_boot_state.loaded &&
+        hosted_live_boot_state.set >= 0 && !hosted_live_boot_state.applied &&
+        hosted_live_boot_state.set == current_set &&
+        hosted_live_boot_state.level_index == current_level;
 
     kill_all();
 
@@ -47175,6 +48883,7 @@ int playlevel(char *filename)
     type = level->type;
 
     // Fixes the start level executing last button bug
+    hosted_live_rebuilding_entities = restoring_live_state;
     for(i = 0; i < levelsets[current_set].maxplayers; i++)
     {
         if(player[i].lives > 0)
@@ -47183,17 +48892,42 @@ int playlevel(char *filename)
             player[i].weapnum = level->setweap;
             player[i].joining = 0;
             player[i].hasplayed = 1;
-            spawnplayer(i);
-            player[i].ent->rush.max = 0;
+            if(restoring_live_state)
+            {
+                int state_index;
+                player[i].ent = NULL;
+                for(state_index = 0; state_index < hosted_live_boot_state.entity_count; ++state_index)
+                {
+                    s_hosted_live_entity_boot *state = hosted_live_boot_state.entities + state_index;
+                    if(!(state->model_type & TYPE_PLAYER) || state->player_index != i) continue;
+                    /* Use the current saved model, including in-game model
+                     * changes, without replaying smartspawn's entry scripts. */
+                    currentspawnplayer = i;
+                    player[i].ent = hosted_live_state_spawn_entity(state);
+                    if(!player[i].ent)
+                        borShutdown(1, "Live state: unable to restore player model '%s'\n", state->model_name);
+                    player[i].ent->playerindex = i;
+                    writeToLogFile("[live-state] restored player=%d model='%s' saved_time=%u\n",
+                                   i, state->model_name, hosted_live_boot_state.elapsed_time);
+                    break;
+                }
+            }
+            else
+            {
+                spawnplayer(i);
+            }
+            if(player[i].ent) player[i].ent->rush.max = 0;
         }
     }
 
+    hosted_live_state_apply_boot_after_level_load();
+
     //execute a script when level started
-    if(Script_IsInitialized(&level_script))
+    if(!restoring_live_state && Script_IsInitialized(&level_script))
     {
         Script_Execute(&level_script);
     }
-    if(Script_IsInitialized(&(level->level_script)))
+    if(!restoring_live_state && Script_IsInitialized(&(level->level_script)))
     {
         Script_Execute(&(level->level_script));
     }
@@ -47957,10 +49691,12 @@ void playgame(int *players,  unsigned which_set, int useSavedGame)
     if(useSavedGame == 1 && save->flag)
     {
         memset(player, 0, sizeof(*player) * 4);
+        writeToLogFile("[live-state] loading native script state\n");
         if(!loadScriptFile())
         {
             printf("Warning, failed to load script save!\n");
         }
+        writeToLogFile("[live-state] native script state loaded\n");
         current_level = save->level;
         current_stage = save->stage;
         if(save->flag == 2) // don't check 1 or 0 becuase if we use saved game the flag must be >0
@@ -50608,6 +52344,17 @@ void openborMain(int argc, char **argv)
 
     if(skiptoset < 0)
     {
+        int autoresume_slot = hosted_autoresume_slot();
+        if(autoresume_slot >= 0)
+        {
+            skiptoset = autoresume_slot;
+            useSet = autoresume_slot;
+            useSave = 1;
+        }
+    }
+
+    if(skiptoset < 0)
+    {
 
         // New alternative background path for PSP
         if(custBkgrds != NULL)
@@ -50691,7 +52438,11 @@ void openborMain(int argc, char **argv)
         }
         else if(skiptoset >= 0)
         {
-            loadGameFile();
+            /* The boot importer has already built savelevel from this exact
+             * snapshot. Native stage progress must not replace that state. */
+            if(!(hosted_live_boot_state.loaded && hosted_live_boot_state.set >= 0 &&
+                 !hosted_live_boot_state.applied))
+                loadGameFile();
             playgame(players, useSet >= 0 ? useSet : skiptoset, useSave);
         }
         else

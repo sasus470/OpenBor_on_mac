@@ -160,6 +160,7 @@ BUILD_GFX       = 1
 BUILD_LINUX     = 1
 BUILD_PTHREAD   = 1
 BUILD_SDL_IO    = 1
+BUILD_METAL     = 1
 BUILD_VORBIS    = 1
 BUILD_WEBM      = 1
 BUILDING        = 1
@@ -466,6 +467,11 @@ ifdef BUILD_OPENGL
 GAME_CONSOLE   += sdl/opengl.o
 endif
 
+ifdef BUILD_METAL
+GAME_CONSOLE   += sdl/metal.o                                                                        \
+                  sdl/v2bridge.o
+endif
+
 
 ifdef BUILD_LOADGL
 GAME_CONSOLE   += sdl/loadgl.o
@@ -517,6 +523,10 @@ CFLAGS         += -Wno-unused-result $(SDL2_CFLAGS)
 endif
 ifdef BUILD_DARWIN
 CFLAGS         += -Wno-unused-result $(SDL2_CFLAGS)
+endif
+
+ifdef BUILD_METAL
+CFLAGS         += -DOB_METAL=1
 endif
 
 ifndef BUILD_DEBUG
@@ -634,6 +644,10 @@ LIBS           += -Wl,-syslibroot,$(SDKPATH)
 endif
 LIBS           += -framework Cocoa \
                   -framework OpenGL \
+                  -framework Metal \
+                  -framework IOSurface \
+                  -framework QuartzCore \
+                  -framework Foundation \
                   -framework Carbon \
                   -framework AudioUnit \
                   -framework IOKit \
@@ -740,6 +754,9 @@ all : $(TARGET) $(TARGET_FINAL)
 %.o : %.c
 	@echo Compiling $(TARGET_PLATFORM) Port: $<...
 	@$(CC) $(CFLAGS) -c $< -o $@
+%.o : %.m
+	@echo Compiling $(TARGET_PLATFORM) Port: $<...
+	@$(CC) $(CFLAGS) -fobjc-arc -c $< -o $@
 $(TARGET) : $(OBJS) $(RES)
 	@echo
 	@echo Linking $(TARGET_PLATFORM) Port: $(TARGET)...

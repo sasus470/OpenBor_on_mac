@@ -54,6 +54,30 @@ void SB_playstop()
     SDL_CloseAudioDevice(audio_dev);
 }
 
+void SB_suspend_audio()
+{
+    if(!started || !audio_dev) return;
+    SDL_PauseAudioDevice(audio_dev, 1);
+}
+
+void SB_lock_audio(void)
+{
+    if(started && audio_dev) SDL_LockAudioDevice(audio_dev);
+}
+
+void SB_unlock_audio(void)
+{
+    if(started && audio_dev) SDL_UnlockAudioDevice(audio_dev);
+}
+
+void SB_resume_audio()
+{
+    if(!started || !audio_dev) return;
+    // Force SDL/CoreAudio to restart the callback path immediately after a live resume.
+    SDL_PauseAudioDevice(audio_dev, 1);
+    SDL_PauseAudioDevice(audio_dev, 0);
+}
+
 void SB_setvolume(char dev, char volume)
 {
 	if(dev == SB_VOICEVOL)

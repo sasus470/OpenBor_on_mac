@@ -160,6 +160,39 @@ void getBasePath(char *newName, char *name, int type)
 {
 #ifndef DC
     char buf[MAX_BUFFER_LEN] = {""};
+#if defined(SDL) && defined(DARWIN)
+    if(type == 0)
+    {
+        const char *configuredDirectory = NULL;
+
+        if(strcmp(name, "Saves") == 0)
+        {
+            configuredDirectory = savesDir;
+        }
+        else if(strcmp(name, "Logs") == 0)
+        {
+            configuredDirectory = logsDir;
+        }
+        else if(strcmp(name, "ScreenShots") == 0)
+        {
+            configuredDirectory = screenShotsDir;
+        }
+
+        if(configuredDirectory && configuredDirectory[0])
+        {
+            strncpy(buf, configuredDirectory, sizeof(buf) - 1);
+            buf[sizeof(buf) - 1] = '\0';
+
+            if(buf[strlen(buf) - 1] != '/')
+            {
+                strncat(buf, "/", sizeof(buf) - strlen(buf) - 1);
+            }
+
+            strcpy(newName, buf);
+            return;
+        }
+    }
+#endif
     switch(type)
     {
     case 0:

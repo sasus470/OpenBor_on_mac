@@ -11,6 +11,7 @@
 #include "ram.h"
 #include "video.h"
 #include "menu.h"
+#include "sblaster.h"
 #include <time.h>
 #include <unistd.h>
 
@@ -31,6 +32,50 @@ char paksDir[MAX_FILENAME_LEN] = {"Paks"};
 char savesDir[MAX_FILENAME_LEN] = {"Saves"};
 char logsDir[MAX_FILENAME_LEN] = {"Logs"};
 char screenShotsDir[MAX_FILENAME_LEN] = {"ScreenShots"};
+static volatile sig_atomic_t v2_suspend_requested = 0;
+static volatile sig_atomic_t v2_resume_requested = 0;
+
+static void v2_handle_suspend_signal(int signum)
+{
+    (void)signum;
+    v2_suspend_requested = 1;
+}
+
+static void v2_handle_resume_signal(int signum)
+{
+    (void)signum;
+    v2_resume_requested = 1;
+    v2_suspend_requested = 0;
+}
+
+void v2_runtime_update_suspend_state(void)
+{
+    if(!v2_suspend_requested)
+    {
+        if(v2_resume_requested)
+        {
+            SB_resume_audio();
+            v2_resume_requested = 0;
+        }
+        return;
+    }
+
+    SB_suspend_audio();
+
+    while(v2_suspend_requested)
+    {
+        if(v2_resume_requested)
+        {
+            v2_suspend_requested = 0;
+            break;
+        }
+        SDL_PumpEvents();
+        usleep(1000);
+    }
+
+    SB_resume_audio();
+    v2_resume_requested = 0;
+}
 
 static void apply_env_override(char *target, size_t target_size, const char *env_name)
 {
@@ -110,6 +155,9 @@ int main(int argc, char *argv[])
 		borExit(EXIT_FAILURE);
 	}
 #endif
+
+    signal(SIGUSR1, v2_handle_suspend_signal);
+    signal(SIGUSR2, v2_handle_resume_signal);
 
 	setSystemRam();
 	initSDL();

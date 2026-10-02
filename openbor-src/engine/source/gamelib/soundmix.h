@@ -83,6 +83,10 @@ void sound_volume_music(int left, int right);
 void sound_music_tempo(int music_tempo);
 int sound_query_music(char *artist, char *title);
 void sound_pause_music(int toggle);
+int sound_music_is_paused(void);
+void *sound_capture_music_checkpoint(void);
+int sound_restore_music_checkpoint(const void *checkpoint);
+int sound_get_music_volume(void);
 
 void update_sample(unsigned char *buf, int size);
 

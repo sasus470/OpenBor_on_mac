@@ -84,6 +84,7 @@ void Varlist_Init(Varlist *varlist, int size);
 void Varlist_Clear(Varlist *varlist);
 void Varlist_Cleanup(Varlist *varlist);
 int Varlist_SetByName(Varlist *varlist, char *theName, ScriptVariant *var);
+int Varlist_SetByIndex(Varlist *varlist, int index, ScriptVariant *var);
 #define Script_Set_Local_Variant(s, k, v) Varlist_SetByName((s)->varlist, (k), (v))
 void Script_Global_Init();
 void Script_Global_Clear();

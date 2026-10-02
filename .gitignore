@@ -4,6 +4,11 @@
 build/
 *.app
 *.zip
+.build/
+.tmp/
+*.o
+*.elf
+openbor-src/tools/borpak/source/borpak
 
 # Runtime data and generated caches
 *.sqlite
@@ -11,11 +16,9 @@ build/
 OpenBorLog.txt
 ScriptLog.txt
 *.cfg
+*.pak
+*.sav
 
 # Local editor / OS noise
 *.swp
-<<<<<<< HEAD
-
-=======
->>>>>>> 19efdbc6ccaa5d03da9370c4f9b09047fc74dd38
 openbor-src/.git_backup/

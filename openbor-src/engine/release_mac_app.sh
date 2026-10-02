@@ -2,12 +2,13 @@
 
 set -eu
 
-APP_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/releases/DARWIN/OpenBOR.app" && pwd)"
+SCRIPT_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+APP_ROOT="$SCRIPT_ROOT/releases/DARWIN/OpenBOR.app"
 CONTENTS="$APP_ROOT/Contents"
 MACOS_DIR="$CONTENTS/MacOS"
 RES_DIR="$CONTENTS/Resources"
 LIB_DIR="$CONTENTS/Libraries"
-BIN_SRC="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/OpenBOR"
+BIN_SRC="$SCRIPT_ROOT/OpenBOR"
 BIN_DST="$MACOS_DIR/OpenBOR-bin"
 
 mkdir -p "$MACOS_DIR" "$RES_DIR" "$LIB_DIR"

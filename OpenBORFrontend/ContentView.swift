@@ -2,374 +2,232 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
-    
+    @ObservedObject private var language = InterfaceLanguagePreferences.shared
+
     var body: some View {
         ZStack {
-            NavigationSplitView {
-                VStack(spacing: 12) {
-                    HStack {
-                        Label("Library", systemImage: "square.grid.2x2")
-                            .font(.title2.weight(.semibold))
-                        Spacer()
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.18)) {
-                                model.showingSettings = true
-                            }
-                        } label: {
-                            Image(systemName: "gearshape.fill")
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                    
-                    TextField("Search games", text: $model.searchText)
-                        .textFieldStyle(.roundedBorder)
-                    
-                    List(selection: $model.selectedGameID) {
-                        ForEach(model.filteredGames) { game in
-                            GameRow(game: game)
-                                .tag(game.id)
-                                .contentShape(Rectangle())
-                                .onTapGesture(count: 2) {
-                                    model.launch(game: game)
-                                }
-                                .contextMenu {
-                                    Button("Launch") { model.launch(game: game) }
-                                    Button("Import Cover") { model.importCover(for: game) }
-                                    Button("Reveal in Finder") { model.reveal(game) }
-                                }
-                        }
-                    }
-                    .listStyle(.sidebar)
-                    
-                    HStack {
-                        Button("Open Paks") { model.openPaksFolder() }
-                        Spacer()
-                        Text(model.statusText)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(16)
-                .frame(minWidth: 280)
-            } detail: {
+            ArcadeBackground(paused: !model.animatedBackground || (model.runtimeCoordinator.runtimeState == .running && !model.runtimeCoordinator.resumeSessionAvailable))
+            HStack(spacing: 0) {
+                library.frame(width: 300)
+                Rectangle().fill(ArcadePalette.amber.opacity(0.35)).frame(width: 1)
                 GameDetailView(game: model.selectedGame, saves: model.saves(for: model.selectedGame))
-                    .environmentObject(model)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            
             if model.showingSettings {
-                Color.black.opacity(0.35)
-                    .ignoresSafeArea()
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            model.showingSettings = false
-                        }
-                    }
-                
-                SettingsOverlay()
-                    .environmentObject(model)
-                    .transition(.scale(scale: 0.96).combined(with: .opacity))
-                    .zIndex(1)
+                Color.black.opacity(0.72).ignoresSafeArea().onTapGesture { model.showingSettings = false }
+                SettingsOverlay().transition(.opacity).zIndex(1)
             }
         }
+        .foregroundStyle(ArcadePalette.cream)
+        .font(.custom("Menlo", size: 12))
+        .tint(ArcadePalette.amber)
+        .environment(\.colorScheme, .dark)
+        .buttonStyle(ArcadeButtonStyle())
+        .onAppear { model.runtimeCoordinator.selectedPakURL = model.selectedGame?.pakURL }
+        .onChange(of: model.selectedGame?.id) { _, _ in model.runtimeCoordinator.selectedPakURL = model.selectedGame?.pakURL }
+        .onChange(of: language.language) { _, _ in model.statusText = model.localizedRuntimeStatus }
+    }
+
+    private var library: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("OPENBOR / FRONTEND").font(.custom("Menlo-Bold", size: 10)).tracking(1).foregroundStyle(ArcadePalette.amber)
+                    Text(UIStrings.text("Library").uppercased()).font(.custom("Menlo-Bold", size: 22))
+                }
+                Spacer()
+                Button { model.showingSettings = true } label: { Image(systemName: "gearshape.fill") }
+                    .help(UIStrings.text("Settings"))
+            }
+            TextField(UIStrings.text("Search games"), text: $model.searchText).textFieldStyle(.roundedBorder)
+            List(selection: $model.selectedGameID) {
+                ForEach(model.filteredGames) { game in
+                    GameRow(game: game).tag(game.id)
+                        .listRowBackground(model.selectedGameID == game.id ? ArcadePalette.amber.opacity(0.12) : Color.clear)
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) { model.launch(game: game) }
+                        .contextMenu {
+                            Button(UIStrings.text("Launch")) { model.launch(game: game) }
+                            Button(UIStrings.text("Import Cover")) { model.importCover(for: game) }
+                            Button(UIStrings.text("Reveal in Finder")) { model.reveal(game) }
+                        }
+                }
+            }
+            .listStyle(.plain).scrollContentBackground(.hidden)
+            Rectangle().fill(ArcadePalette.amber.opacity(0.35)).frame(height: 1)
+            Text(model.runtimeCoordinator.runtimeState == .idle ? model.statusText : model.localizedRuntimeStatus)
+                .font(.custom("Menlo", size: 10)).foregroundStyle(ArcadePalette.cream.opacity(0.65))
+            Button(UIStrings.text("Open Paks")) { model.openPaksFolder() }
+        }
+        .padding(18).background(ArcadePalette.ink.opacity(0.92))
     }
 }
 
 private struct GameRow: View {
     @EnvironmentObject private var model: AppModel
     let game: GameEntry
-    
     var body: some View {
-        HStack(spacing: 12) {
-            CoverThumbnail(url: model.coverURL(for: game), cornerRadius: 10)
-                .frame(width: 42, height: 56)
-                .id(model.coverRefreshToken(for: game))
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text(game.title)
-                    .font(.headline)
-                    .lineLimit(1)
-                Text(game.pakURL.lastPathComponent)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        HStack(spacing: 10) {
+            CoverThumbnail(url: model.coverURL(for: game)).frame(width: 38, height: 52).id(model.coverRefreshToken(for: game))
+            VStack(alignment: .leading, spacing: 5) {
+                Text(game.title).font(.custom("Menlo-Bold", size: 11)).lineLimit(2)
+                Text(game.pakURL.lastPathComponent).font(.custom("Menlo", size: 9)).foregroundStyle(.secondary).lineLimit(1)
             }
-        }
-        .padding(.vertical, 4)
+        }.padding(.vertical, 6)
     }
 }
 
 private struct GameDetailView: View {
     @EnvironmentObject private var model: AppModel
+    @ObservedObject private var language = InterfaceLanguagePreferences.shared
+    @ObservedObject private var menuPreferences = QuickMenuPreferences.shared
     let game: GameEntry?
     let saves: [SaveEntry]
-    
+
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [.black.opacity(0.92), .orange.opacity(0.18)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
-            
+        ScrollView {
             if let game {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
-                        HStack(alignment: .top, spacing: 24) {
-                            CoverThumbnail(url: model.coverURL(for: game), cornerRadius: 26)
-                                .frame(width: 220, height: 308)
-                                .id(model.coverRefreshToken(for: game))
-                            
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text(game.title)
-                                    .font(.system(size: 36, weight: .bold, design: .rounded))
-                                Text(game.pakURL.lastPathComponent)
-                                    .foregroundStyle(.white.opacity(0.7))
-                                
-                                HStack(spacing: 12) {
-                                    Button {
-                                        model.launch(game: game)
-                                    } label: {
-                                        Label("Play", systemImage: "play.fill")
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                    
-                                    Button {
-                                        model.reveal(game)
-                                    } label: {
-                                        Label("Reveal", systemImage: "folder")
-                                    }
-                                    .buttonStyle(.bordered)
-                                    
-                                    Button {
-                                        model.importCover(for: game)
-                                    } label: {
-                                        Label("Import Cover", systemImage: "photo")
-                                    }
-                                    .buttonStyle(.bordered)
+                VStack(alignment: .leading, spacing: 22) {
+                    HStack {
+                        Text("PLAYER ONE / SELECT GAME").font(.custom("Menlo-Bold", size: 10)).tracking(1).foregroundStyle(ArcadePalette.amber)
+                        Spacer()
+                        Text("32 BIT").font(.custom("Menlo-Bold", size: 11)).padding(8).foregroundStyle(ArcadePalette.ink).background(ArcadePalette.amber)
+                    }
+                    HStack(alignment: .top, spacing: 20) {
+                        CoverThumbnail(url: model.coverURL(for: game)).frame(width: 156, height: 218).id(model.coverRefreshToken(for: game))
+                        VStack(alignment: .leading, spacing: 14) {
+                            Text(game.title).font(.custom("Menlo-Bold", size: 23)).fixedSize(horizontal: false, vertical: true)
+                            Text(game.pakURL.lastPathComponent).font(.custom("Menlo", size: 10)).foregroundStyle(.secondary).lineLimit(2)
+                            Text(model.renderBackend.title).foregroundStyle(ArcadePalette.amber)
+                            Button(UIStrings.text("Play")) { model.launch(game: game) }
+                                .buttonStyle(ArcadeButtonStyle(prominent: true)).disabled(!model.runtimeCoordinator.canLaunchSelectedGame)
+                            ViewThatFits(in: .horizontal) {
+                                HStack {
+                                    Button(UIStrings.text("Reveal")) { model.reveal(game) }
+                                    Button(UIStrings.text("Import Cover")) { model.importCover(for: game) }
                                 }
-                                
-                                Text("Cover art")
-                                    .font(.title3.weight(.semibold))
-                                    .padding(.top, 10)
-                                Text("Generated automatically and stored in the local cover library database.")
-                                    .foregroundStyle(.white.opacity(0.72))
+                                VStack(alignment: .leading) {
+                                    Button(UIStrings.text("Reveal")) { model.reveal(game) }
+                                    Button(UIStrings.text("Import Cover")) { model.importCover(for: game) }
+                                }
                             }
                         }
-                        
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Recent Saves")
-                                .font(.title3.weight(.semibold))
-                            
-                            if saves.isEmpty {
-                                Text("No saves yet for this game.")
-                                    .foregroundStyle(.white.opacity(0.7))
-                            } else {
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 14) {
-                                        ForEach(saves) { save in
-                                            Button {
-                                                model.reveal(save)
-                                            } label: {
-                                                VStack(alignment: .leading, spacing: 8) {
-                                                    Image(systemName: "externaldrive.fill")
-                                                        .font(.system(size: 28))
-                                                    Text(save.displayName)
-                                                        .font(.headline)
-                                                        .lineLimit(2)
-                                                    Text(save.modifiedAt.formatted(date: .abbreviated, time: .shortened))
-                                                        .font(.caption)
-                                                        .foregroundStyle(.white.opacity(0.7))
-                                                }
-                                                .frame(width: 190, height: 120, alignment: .leading)
-                                                .padding(16)
-                                                .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 20))
-                                            }
-                                            .buttonStyle(.plain)
+                        Spacer(minLength: 0)
+                    }.modifier(ArcadePanel())
+                    LauncherSessionView(coordinator: model.runtimeCoordinator)
+                    VStack(alignment: .leading, spacing: 12) {
+                        sectionTitle("Recent Saves")
+                        if saves.isEmpty {
+                            Text(UIStrings.text("No saves yet for this game.")).foregroundStyle(.secondary)
+                        } else {
+                            ScrollView(.horizontal) {
+                                HStack(spacing: 12) {
+                                    ForEach(saves) { save in
+                                        Button { model.reveal(save) } label: {
+                                            VStack(alignment: .leading, spacing: 8) {
+                                                Image(systemName: "externaldrive.fill")
+                                                Text(save.displayName).lineLimit(2)
+                                                Text(save.modifiedAt.formatted(date: .abbreviated, time: .shortened)).font(.custom("Menlo", size: 9)).foregroundStyle(.secondary)
+                                            }.frame(width: 165, height: 75, alignment: .leading)
                                         }
                                     }
                                 }
                             }
                         }
-                        
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Controls")
-                                .font(.title3.weight(.semibold))
-                            Text("In game: pause with Start or Invio, then open Options > Control Options > Setup Player 1...")
-                                .foregroundStyle(.white.opacity(0.75))
-                            Text("Fullscreen: F11 or Alt+Invio")
-                                .foregroundStyle(.white.opacity(0.75))
-                        }
-                    }
-                    .padding(28)
-                }
+                    }.modifier(ArcadePanel())
+                    VStack(alignment: .leading, spacing: 10) {
+                        sectionTitle("Controls")
+                        Text(UIStrings.text("Controls help")).foregroundStyle(.secondary)
+                        Text("\(menuPreferences.keyboard.title) / \(menuPreferences.controller.title)").foregroundStyle(ArcadePalette.amber)
+                    }.modifier(ArcadePanel())
+                }.padding(24)
             } else {
-                VStack(spacing: 16) {
-                    Image(systemName: "shippingbox.fill")
-                        .font(.system(size: 56))
-                    Text("No games in library")
-                        .font(.title2.bold())
-                    Text("Use the settings gear or the Open Paks button to add `.pak` files.")
-                        .foregroundStyle(.white.opacity(0.7))
-                }
-                .foregroundStyle(.white)
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("OPENBOR / SYSTEM READY").font(.custom("Menlo-Bold", size: 12)).foregroundStyle(ArcadePalette.amber)
+                    Text(UIStrings.text("No games in library")).font(.custom("Menlo-Bold", size: 22))
+                    Text(UIStrings.text("Add games help"))
+                }.modifier(ArcadePanel()).padding(24)
             }
         }
-        .foregroundStyle(.white)
+    }
+
+    private func sectionTitle(_ key: String) -> some View {
+        Text(UIStrings.text(key).uppercased()).font(.custom("Menlo-Bold", size: 12)).tracking(1).foregroundStyle(ArcadePalette.amber)
     }
 }
 
 private struct CoverThumbnail: View {
     let url: URL?
-    let cornerRadius: CGFloat
-    
     var body: some View {
         ZStack {
-            if let url,
-               let data = try? Data(contentsOf: url),
-               let image = NSImage(data: data) {
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(0.714, contentMode: .fill)
+            if let url, let data = try? Data(contentsOf: url), let image = NSImage(data: data) {
+                Image(nsImage: image).resizable().aspectRatio(0.714, contentMode: .fill)
             } else {
-                RoundedRectangle(cornerRadius: cornerRadius)
-                    .fill(
-                        LinearGradient(
-                            colors: [.orange.opacity(0.92), .red.opacity(0.75)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .overlay(
-                        Image(systemName: "gamecontroller.fill")
-                            .font(.system(size: 28, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.85))
-                    )
+                ArcadePalette.ink
+                Image(systemName: "gamecontroller.fill").font(.system(size: 24)).foregroundStyle(ArcadePalette.amber)
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-        .overlay(
-            RoundedRectangle(cornerRadius: cornerRadius)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.18), radius: 12, y: 8)
+        .clipped()
+        .overlay(Rectangle().strokeBorder(ArcadePalette.amber.opacity(0.55), lineWidth: 1).allowsHitTesting(false))
     }
 }
 
 struct SettingsOverlay: View {
+    @ObservedObject private var language = InterfaceLanguagePreferences.shared
     @EnvironmentObject private var model: AppModel
-    
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                Text("Settings")
-                    .font(.title.bold())
-                Spacer()
-                Button {
-                    close()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title2)
-                }
-                .buttonStyle(.plain)
-                Button("Done") { close() }
-                    .keyboardShortcut(.defaultAction)
-            }
-            
-            settingsRow(title: "Paks", path: model.pakDirectory.path) {
-                model.openPaksFolder()
-            }
-            settingsRow(title: "Saves", path: model.savesDirectory.path) {
-                model.openSavesFolder()
-            }
-            settingsRow(title: "Logs", path: model.logsDirectory.path) {
-                NSWorkspace.shared.open(model.logsDirectory)
-            }
-            settingsRow(title: "ScreenShots", path: model.screenshotsDirectory.path) {
-                NSWorkspace.shared.open(model.screenshotsDirectory)
-            }
-            settingsRow(title: "Covers", path: model.coversDirectory.path) {
-                model.openCoversFolder()
-            }
-            
-            VStack(alignment: .leading, spacing: 10) {
-                Text("ScreenScraper")
-                    .font(.headline)
-                Text("Inserisci le credenziali API per scaricare cover reali e salvarle automaticamente nel database locale.")
-                    .foregroundStyle(.secondary)
-                
-                TextField("Developer ID", text: $model.screenScraperDeveloperID)
-                    .textFieldStyle(.roundedBorder)
-                SecureField("Developer Password", text: $model.screenScraperDeveloperPassword)
-                    .textFieldStyle(.roundedBorder)
-                TextField("User ID (optional)", text: $model.screenScraperUserID)
-                    .textFieldStyle(.roundedBorder)
-                SecureField("User Password (optional)", text: $model.screenScraperUserPassword)
-                    .textFieldStyle(.roundedBorder)
-                
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
                 HStack {
-                    Button("Refresh Covers") {
-                        model.refreshRemoteCovers()
-                    }
-                    .disabled(!model.hasScreenScraperDeveloperCredentials)
-                    
-                    if model.hasScreenScraperDeveloperCredentials {
-                        Text("Cover online attive")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("Servono almeno Developer ID e Developer Password")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text(UIStrings.text("Settings").uppercased()).font(.custom("Menlo-Bold", size: 23))
+                    Spacer()
+                    Button(UIStrings.text("Done")) { model.showingSettings = false }
                 }
-            }
-            .padding(14)
-            .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
-            
-            VStack(alignment: .leading, spacing: 8) {
-                Text("ES-DE ready")
-                    .font(.headline)
-                Text("The frontend keeps your library in Application Support and the app executable supports `--launch <pak-path>`, which makes future frontend integration easier.")
-                    .foregroundStyle(.secondary)
-            }
-            
-            Spacer()
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(UIStrings.text("Engine").uppercased()).font(.custom("Menlo-Bold", size: 12)).foregroundStyle(ArcadePalette.amber)
+                    Picker(UIStrings.text("Engine"), selection: $model.renderBackend) {
+                        ForEach(LauncherRenderBackend.allCases) { Text($0.title).tag($0) }
+                    }
+                    Text(UIStrings.text("Renderer help")).foregroundStyle(.secondary)
+                    Toggle(UIStrings.text("Animated background"), isOn: $model.animatedBackground)
+                }.modifier(ArcadePanel())
+                QuickMenuSettingsView(retroStyle: true)
+                settingsRow(title: "Paks", path: model.pakDirectory.path, action: model.openPaksFolder)
+                settingsRow(title: "Saves", path: model.savesDirectory.path, action: model.openSavesFolder)
+                settingsRow(title: "Logs", path: model.logsDirectory.path) { NSWorkspace.shared.open(model.logsDirectory) }
+                settingsRow(title: "ScreenShots", path: model.screenshotsDirectory.path) { NSWorkspace.shared.open(model.screenshotsDirectory) }
+                settingsRow(title: "Covers", path: model.coversDirectory.path, action: model.openCoversFolder)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("SCREENSCRAPER").font(.custom("Menlo-Bold", size: 12)).foregroundStyle(ArcadePalette.amber)
+                    Text(UIStrings.text("ScreenScraper help")).foregroundStyle(.secondary)
+                    TextField(UIStrings.text("Developer ID"), text: $model.screenScraperDeveloperID).textFieldStyle(.roundedBorder)
+                    SecureField(UIStrings.text("Developer Password"), text: $model.screenScraperDeveloperPassword).textFieldStyle(.roundedBorder)
+                    TextField(UIStrings.text("User ID (optional)"), text: $model.screenScraperUserID).textFieldStyle(.roundedBorder)
+                    SecureField(UIStrings.text("User Password (optional)"), text: $model.screenScraperUserPassword).textFieldStyle(.roundedBorder)
+                    Button(UIStrings.text("Refresh Covers")) { model.refreshRemoteCovers() }.disabled(!model.hasScreenScraperDeveloperCredentials)
+                    Text(UIStrings.text(model.hasScreenScraperDeveloperCredentials ? "Online covers enabled" : "Credentials needed")).foregroundStyle(.secondary)
+                }.modifier(ArcadePanel())
+                Text(UIStrings.text("Integration help")).foregroundStyle(.secondary)
+            }.padding(24)
         }
-        .padding(24)
-        .frame(width: 640, height: 380)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24))
-        .overlay(
-            RoundedRectangle(cornerRadius: 24)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.28), radius: 28, y: 16)
-        .onExitCommand {
-            close()
-        }
+        .frame(width: 680, height: 560)
+        .background(ArcadePalette.ink)
+        .overlay(Rectangle().strokeBorder(ArcadePalette.amber, lineWidth: 2).allowsHitTesting(false))
+        .padding(5)
+        .overlay(Rectangle().strokeBorder(ArcadePalette.amber.opacity(0.35), lineWidth: 1).allowsHitTesting(false))
+        .compositingGroup()
+        .shadow(color: .black.opacity(0.7), radius: 0, x: 8, y: 8)
+        .onExitCommand { model.showingSettings = false }
     }
-    
+
     private func settingsRow(title: String, path: String, action: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(title)
-                    .font(.headline)
+                Text(UIStrings.text(title).uppercased()).font(.custom("Menlo-Bold", size: 12)).foregroundStyle(ArcadePalette.amber)
                 Spacer()
-                Button("Open", action: action)
+                Button(UIStrings.text("Open"), action: action)
             }
-            Text(path)
-                .textSelection(.enabled)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-        }
-        .padding(14)
-        .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 14))
-    }
-    
-    private func close() {
-        withAnimation(.easeInOut(duration: 0.18)) {
-            model.showingSettings = false
-        }
+            Text(path).textSelection(.enabled).font(.custom("Menlo", size: 10)).foregroundStyle(.secondary)
+        }.modifier(ArcadePanel())
     }
 }

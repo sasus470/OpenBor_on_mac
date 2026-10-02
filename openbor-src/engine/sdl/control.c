@@ -15,6 +15,8 @@
 #include "sblaster.h"
 #include "joysticks.h"
 #include "openbor.h"
+#include <stdio.h>
+#include <string.h>
 
 #define T_AXIS 7000
 
@@ -39,6 +41,112 @@ extern int nativeWidth;
 extern int nativeHeight;
 static TouchStatus touch_info;
 #endif
+
+static int v2_input_initialized = 0;
+static int v2_input_hosted = 0;
+static char v2_input_path[1024] = {0};
+
+static void v2_input_init(void)
+{
+    const char *input_path = NULL;
+    const char *hosted = NULL;
+
+    if(v2_input_initialized) return;
+    v2_input_initialized = 1;
+
+    input_path = getenv("OPENBOR_V2_INPUT_PATH");
+    hosted = getenv("OPENBOR_V2_HOSTED");
+    v2_input_hosted = (hosted != NULL && hosted[0] == '1') ? 1 : 0;
+
+    if(input_path != NULL && input_path[0] != '\0')
+    {
+        SDL_strlcpy(v2_input_path, input_path, sizeof(v2_input_path));
+    }
+}
+
+static void v2_input_apply(Uint8* keystate, Uint8* keystate_def)
+{
+    FILE *file = NULL;
+    int values[12] = {0};
+    int count = 0;
+
+    v2_input_init();
+    if(!v2_input_hosted || v2_input_path[0] == '\0' || !keystate || !keystate_def) return;
+
+    keystate[CONTROL_DEFAULT1_UP] = 0;
+    keystate[CONTROL_DEFAULT1_DOWN] = 0;
+    keystate[CONTROL_DEFAULT1_LEFT] = 0;
+    keystate[CONTROL_DEFAULT1_RIGHT] = 0;
+    keystate[CONTROL_DEFAULT1_FIRE1] = 0;
+    keystate[CONTROL_DEFAULT1_FIRE2] = 0;
+    keystate[CONTROL_DEFAULT1_FIRE3] = 0;
+    keystate[CONTROL_DEFAULT1_FIRE4] = 0;
+    keystate[CONTROL_DEFAULT1_FIRE5] = 0;
+    keystate[CONTROL_DEFAULT1_FIRE6] = 0;
+    keystate[CONTROL_DEFAULT1_START] = 0;
+    keystate[CONTROL_DEFAULT1_ESC] = 0;
+
+    keystate_def[CONTROL_DEFAULT1_UP] = 0;
+    keystate_def[CONTROL_DEFAULT1_DOWN] = 0;
+    keystate_def[CONTROL_DEFAULT1_LEFT] = 0;
+    keystate_def[CONTROL_DEFAULT1_RIGHT] = 0;
+    keystate_def[CONTROL_DEFAULT1_FIRE1] = 0;
+    keystate_def[CONTROL_DEFAULT1_FIRE2] = 0;
+    keystate_def[CONTROL_DEFAULT1_FIRE3] = 0;
+    keystate_def[CONTROL_DEFAULT1_FIRE4] = 0;
+    keystate_def[CONTROL_DEFAULT1_FIRE5] = 0;
+    keystate_def[CONTROL_DEFAULT1_FIRE6] = 0;
+    keystate_def[CONTROL_DEFAULT1_START] = 0;
+    keystate_def[CONTROL_DEFAULT1_ESC] = 0;
+
+    file = fopen(v2_input_path, "r");
+    if(file == NULL) return;
+
+    count = fscanf(file, "%d %d %d %d %d %d %d %d %d %d %d %d",
+                   &values[0], &values[1], &values[2], &values[3],
+                   &values[4], &values[5], &values[6], &values[7],
+                   &values[8], &values[9], &values[10], &values[11]);
+    fclose(file);
+    if(count < 12) return;
+
+    keystate[CONTROL_DEFAULT1_UP] = keystate_def[CONTROL_DEFAULT1_UP] = values[0] ? 1 : 0;
+    keystate[CONTROL_DEFAULT1_DOWN] = keystate_def[CONTROL_DEFAULT1_DOWN] = values[1] ? 1 : 0;
+    keystate[CONTROL_DEFAULT1_LEFT] = keystate_def[CONTROL_DEFAULT1_LEFT] = values[2] ? 1 : 0;
+    keystate[CONTROL_DEFAULT1_RIGHT] = keystate_def[CONTROL_DEFAULT1_RIGHT] = values[3] ? 1 : 0;
+    keystate[CONTROL_DEFAULT1_FIRE1] = keystate_def[CONTROL_DEFAULT1_FIRE1] = values[4] ? 1 : 0;
+    keystate[CONTROL_DEFAULT1_FIRE2] = keystate_def[CONTROL_DEFAULT1_FIRE2] = values[5] ? 1 : 0;
+    keystate[CONTROL_DEFAULT1_FIRE3] = keystate_def[CONTROL_DEFAULT1_FIRE3] = values[6] ? 1 : 0;
+    keystate[CONTROL_DEFAULT1_FIRE4] = keystate_def[CONTROL_DEFAULT1_FIRE4] = values[7] ? 1 : 0;
+    keystate[CONTROL_DEFAULT1_FIRE5] = keystate_def[CONTROL_DEFAULT1_FIRE5] = values[8] ? 1 : 0;
+    keystate[CONTROL_DEFAULT1_FIRE6] = keystate_def[CONTROL_DEFAULT1_FIRE6] = values[9] ? 1 : 0;
+    keystate[CONTROL_DEFAULT1_START] = keystate_def[CONTROL_DEFAULT1_START] = values[10] ? 1 : 0;
+    keystate[CONTROL_DEFAULT1_ESC] = keystate_def[CONTROL_DEFAULT1_ESC] = values[11] ? 1 : 0;
+}
+
+static int v2_input_should_ignore_sdl_event(Uint32 event_type)
+{
+    v2_input_init();
+    if(!v2_input_hosted) return 0;
+
+    switch(event_type)
+    {
+        case SDL_KEYDOWN:
+        case SDL_KEYUP:
+        case SDL_JOYAXISMOTION:
+        case SDL_JOYHATMOTION:
+        case SDL_JOYBUTTONDOWN:
+        case SDL_JOYBUTTONUP:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int v2_input_is_hosted(void)
+{
+    v2_input_init();
+    return v2_input_hosted;
+}
 
 static int player1_uses_default_keyboard(void)
 {
@@ -89,6 +197,10 @@ void getPads(Uint8* keystate, Uint8* keystate_def)
 	SDL_Event ev;
 	while(SDL_PollEvent(&ev))
 	{
+		if(v2_input_should_ignore_sdl_event(ev.type))
+		{
+			continue;
+		}
 		switch(ev.type)
 		{
 			case SDL_KEYDOWN:
@@ -198,6 +310,21 @@ void getPads(Uint8* keystate, Uint8* keystate_def)
 #endif
 			case SDL_QUIT:
 				borShutdown(0, DEFAULT_SHUTDOWN_MESSAGE);
+				break;
+
+			case SDL_WINDOWEVENT:
+#ifdef DARWIN
+				if(ev.window.event == SDL_WINDOWEVENT_MOVED ||
+				   ev.window.event == SDL_WINDOWEVENT_RESIZED ||
+				   ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+				{
+					video_sync_windowed_bounds();
+				}
+				if(ev.window.event == SDL_WINDOWEVENT_RESTORED)
+				{
+					video_recenter_windowed();
+				}
+#endif
 				break;
 
 			case SDL_JOYBUTTONUP:
@@ -967,11 +1094,20 @@ void control_update(s_playercontrols ** playercontrols, int numplayers)
 	unsigned i;
 	int player;
 	int t;
+	int keycount = 0;
 	s_playercontrols * pcontrols;
-	Uint8* keystate = (Uint8*)SDL_GetKeyState(NULL); // Here retrieve keyboard state
+
+    v2_runtime_update_suspend_state();
+
+	Uint8* keystate = (Uint8*)SDL_GetKeyState(&keycount); // Here retrieve keyboard state
 	Uint8* keystate_def = (Uint8*)SDL_GetKeyState(NULL); // Here retrieve keyboard state for default
 
 	getPads(keystate,keystate_def);
+	if(v2_input_is_hosted() && keystate && keycount > 0)
+	{
+		memset(keystate, 0, (size_t)keycount);
+	}
+	v2_input_apply(keystate, keystate_def);
 
 	for(player = 0; player < numplayers; player++){
 

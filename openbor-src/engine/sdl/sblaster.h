@@ -29,6 +29,10 @@ extern char *errptr;
 // The interface
 int SB_playstart(int bits, int samplerate);
 void SB_playstop();
+void SB_suspend_audio(void);
+void SB_resume_audio(void);
+void SB_lock_audio(void);
+void SB_unlock_audio(void);
 
 //int SB_getvolume(char dev);
 void SB_setvolume(char dev, char volume);

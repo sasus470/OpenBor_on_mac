@@ -15,6 +15,7 @@ typedef struct {
 	int width;
 	int height;
 	int pitch;
+	int bytes_per_pixel;
 	void *data;
 } s_videosurface;
 

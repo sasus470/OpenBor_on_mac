@@ -15,6 +15,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include "globals.h"
 
@@ -49,6 +50,7 @@ extern char rootDir[MAX_BUFFER_LEN];
 #endif
 void borExit(int reset);
 void openborMain(int argc, char** argv);
+void v2_runtime_update_suspend_state(void);
 
 extern char packfile[MAX_FILENAME_LEN];
 extern char paksDir[MAX_FILENAME_LEN];

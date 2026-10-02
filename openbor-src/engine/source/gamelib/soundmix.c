@@ -53,6 +53,8 @@ Caution: move vorbis headers here otherwise the structs will
 #include "sblaster.h"
 #include "borendian.h"
 #include "List.h"
+#include "stristr.h"
+#include "utils.h"
 
 
 #define		MIXSHIFT		     3	    // 2 should be OK
@@ -119,6 +121,7 @@ static s32 *mixbuf = NULL;
 static int playbits;
 int playfrequency;
 static int max_channels = 0;
+static int sample_channel_hint = 0;
 
 // Indicates whether the hardware is playing, and if mixing is active
 static int mixing_active = 0;
@@ -524,11 +527,18 @@ static void mixaudio(unsigned int todo)
                 sptr8 = soundcache[snum].sample.sampleptr;
                 for(i = 0; i < (int)todo;)
                 {
-                    lmusic = rmusic = sptr8[FIX_TO_INT(fp_pos)];
-                    mixbuf[i++] += ((lmusic << 8) * lvolume / MAXVOLUME * 1.5) - 0x8000;
+                    unsigned int sample_index = FIX_TO_INT(fp_pos);
+                    unsigned int next_index = (sample_index + 1 < modlen) ? (sample_index + 1) : sample_index;
+                    unsigned int frac = fp_pos & 0x0FFF;
+                    int sample_a = sptr8[sample_index] - 128;
+                    int sample_b = sptr8[next_index] - 128;
+                    int interpolated = sample_a + (((sample_b - sample_a) * (int)frac) >> 12);
+
+                    lmusic = rmusic = interpolated;
+                    mixbuf[i++] += (lmusic << 8) * lvolume / MAXVOLUME * 1.5;
                     if(vchannel[chan].channels == SOUND_MONO)
                     {
-                        mixbuf[i++] += ((rmusic << 8) * rvolume / MAXVOLUME * 1.5) - 0x8000;
+                        mixbuf[i++] += (rmusic << 8) * rvolume / MAXVOLUME * 1.5;
                     }
                     fp_pos += fp_period;
 
@@ -549,7 +559,14 @@ static void mixaudio(unsigned int todo)
                 sptr16 = soundcache[snum].sample.sampleptr;
                 for(i = 0; i < (int)todo;)
                 {
-                    lmusic = rmusic = (int)(short)SwapLSB16(sptr16[FIX_TO_INT(fp_pos)]);
+                    unsigned int sample_index = FIX_TO_INT(fp_pos);
+                    unsigned int next_index = (sample_index + 1 < modlen) ? (sample_index + 1) : sample_index;
+                    unsigned int frac = fp_pos & 0x0FFF;
+                    int sample_a = (int)(short)SwapLSB16(sptr16[sample_index]);
+                    int sample_b = (int)(short)SwapLSB16(sptr16[next_index]);
+                    int interpolated = sample_a + (((sample_b - sample_a) * (int)frac) >> 12);
+
+                    lmusic = rmusic = interpolated;
                     mixbuf[i++] += (lmusic * lvolume / MAXVOLUME * 1.5);
                     if(vchannel[chan].channels == SOUND_MONO)
                     {
@@ -637,6 +654,7 @@ int sound_play_sample(int samplenum, unsigned int priority, int lvolume, int rvo
     int i;
     unsigned int prio_low;
     int channel;
+    int is_shoot_sample = 0;
 
     if(!mixing_inited)
     {
@@ -656,13 +674,25 @@ int sound_play_sample(int samplenum, unsigned int priority, int lvolume, int rvo
         return -1;
     }
 
+    if(soundcache[samplenum].filename &&
+       stristr(soundcache[samplenum].filename, "shoot.wav"))
+    {
+        is_shoot_sample = 1;
+    }
+
     // Try to find unused SFX channel
     channel = -1;
     for(i = 0; i < max_channels; i++)
     {
-        if(!vchannel[i].active)
+        int probe = is_shoot_sample ? ((sample_channel_hint + i) % max_channels) : i;
+
+        if(!vchannel[probe].active)
         {
-            channel = i;
+            channel = probe;
+            if(is_shoot_sample)
+            {
+                sample_channel_hint = (probe + 1) % max_channels;
+            }
         }
     }
 
@@ -701,8 +731,7 @@ int sound_play_sample(int samplenum, unsigned int priority, int lvolume, int rvo
     }
 
     vchannel[channel].samplenum = samplenum;
-    // Prevent samples from being played at EXACT same point
-    vchannel[channel].fp_samplepos = INT_TO_FIX((channel * 4) % soundcache[samplenum].sample.soundlen);
+    vchannel[channel].fp_samplepos = 0;
     vchannel[channel].fp_period = (INT_TO_FIX(1) * speed / 100) * soundcache[samplenum].sample.frequency / playfrequency;
     vchannel[channel].volume[0] = lvolume;
     vchannel[channel].volume[1] = rvolume;
@@ -711,6 +740,22 @@ int sound_play_sample(int samplenum, unsigned int priority, int lvolume, int rvo
     vchannel[channel].active = CHANNEL_PLAYING;
     vchannel[channel].paused = 0;
     vchannel[channel].playid = ++sample_play_id;
+
+    if(soundcache[samplenum].filename)
+    {
+        writeToLogFile("[mac-audio-debug] sample='%s' channel=%d playid=%d priority=%u speed=%u freq=%d bits=%d channels=%d lvol=%d rvol=%d samplepos=%u\n",
+                       soundcache[samplenum].filename,
+                       channel,
+                       vchannel[channel].playid,
+                       priority,
+                       speed,
+                       soundcache[samplenum].sample.frequency,
+                       soundcache[samplenum].sample.bits,
+                       soundcache[samplenum].sample.channels,
+                       lvolume,
+                       rvolume,
+                       vchannel[channel].fp_samplepos);
+    }
 
     return channel;
 }
@@ -1554,6 +1599,95 @@ void sound_pause_music(int toggle)
     musicchannel.paused = toggle;
 }
 
+int sound_music_is_paused(void)
+{
+    return musicchannel.paused;
+}
+
+int sound_get_music_volume(void)
+{
+    return musicchannel.volume[0];
+}
+
+typedef struct
+{
+    musicchannelstruct channel;
+    short buffers[MUSIC_NUM_BUFFERS][MUSIC_BUF_SIZE];
+    int type, looping, atend, section, loop_set;
+    ogg_int64_t decoder_position;
+    u32 offset;
+    short predictor[2], loop_predictor[2];
+    char index[2], loop_step[2];
+} music_checkpoint;
+
+void *sound_capture_music_checkpoint(void)
+{
+    music_checkpoint *state;
+    int i;
+    if(!sound_query_music(NULL, NULL)) return NULL;
+    state = calloc(1, sizeof(*state));
+    if(!state) return NULL;
+    /* The audio callback advances the playing buffer independently of the
+     * decoder. Capture both under its lock, not just the read-ahead cursor. */
+    SB_lock_audio();
+    state->channel = musicchannel;
+    state->type = music_type;
+    state->decoder_position = music_type == 1 ? ov_pcm_tell(oggfile) : seekpackfile(adpcm_handle, 0, SEEK_CUR);
+    state->looping = music_looping;
+    state->atend = music_atend;
+    state->section = current_section;
+    state->offset = loop_offset;
+    state->loop_set = loop_state_set;
+    for(i = 0; i < MUSIC_NUM_BUFFERS; ++i)
+        memcpy(state->buffers[i], musicchannel.buf[i], sizeof(state->buffers[i]));
+    for(i = 0; i < 2; ++i)
+    {
+        state->predictor[i] = adpcm_valprev(i);
+        state->index[i] = adpcm_index(i);
+        state->loop_predictor[i] = loop_valprev[i];
+        state->loop_step[i] = loop_index[i];
+    }
+    SB_unlock_audio();
+    if(state->decoder_position < 0) { free(state); return NULL; }
+    return state;
+}
+
+int sound_restore_music_checkpoint(const void *checkpoint)
+{
+    const music_checkpoint *state = checkpoint;
+    short *buffers[MUSIC_NUM_BUFFERS];
+    int i, valid;
+    if(!state || state->type != music_type || !sound_query_music(NULL, NULL)) return 0;
+    SB_lock_audio();
+    if(music_type == 1)
+        valid = ov_pcm_seek(oggfile, state->decoder_position) == 0;
+    else
+        valid = seekpackfile(adpcm_handle, (int)state->decoder_position, SEEK_SET) == state->decoder_position;
+    if(valid)
+    {
+        for(i = 0; i < MUSIC_NUM_BUFFERS; ++i)
+        {
+            buffers[i] = musicchannel.buf[i];
+            memcpy(buffers[i], state->buffers[i], sizeof(state->buffers[i]));
+        }
+        musicchannel = state->channel;
+        for(i = 0; i < MUSIC_NUM_BUFFERS; ++i) musicchannel.buf[i] = buffers[i];
+        music_looping = state->looping;
+        music_atend = state->atend;
+        current_section = state->section;
+        loop_offset = state->offset;
+        loop_state_set = state->loop_set;
+        for(i = 0; i < 2; ++i)
+        {
+            adpcm_loop_reset(i, state->predictor[i], state->index[i]);
+            loop_valprev[i] = state->loop_predictor[i];
+            loop_index[i] = state->loop_step[i];
+        }
+    }
+    SB_unlock_audio();
+    return valid;
+}
+
 void sound_stop_playback()
 {
     int i;
@@ -1683,4 +1817,3 @@ int maxchannels()
 {
     return MAX_CHANNELS;
 }
-

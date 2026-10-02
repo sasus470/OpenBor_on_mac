@@ -116,6 +116,7 @@ s_videosurface *getVideoSurface(s_screen *src)
 		videoSurface.width = screen->w;
 		videoSurface.height = screen->h;
 		videoSurface.pitch = screen->pitch;
+		videoSurface.bytes_per_pixel = screen->format->BytesPerPixel;
 		videoSurface.data = screen->pixels;
 	}
 	else
@@ -123,6 +124,7 @@ s_videosurface *getVideoSurface(s_screen *src)
 		videoSurface.width = src->width;
 		videoSurface.height = src->height;
 		videoSurface.pitch = src->width * pixelbytes[(int)src->pixelformat];
+		videoSurface.bytes_per_pixel = pixelbytes[(int)src->pixelformat];
 		videoSurface.data = src->data;
 	}
 	return &videoSurface;
@@ -142,4 +144,3 @@ void vga_setpalette(unsigned char* palette)
 	if(!screenPalette) screenPalette = SDL_AllocPalette(256);
 	SDL_SetPaletteColors(screenPalette, colors, 0, 256);
 }
-
