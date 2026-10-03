@@ -29,6 +29,13 @@ final class HostWindowCoordinator: ObservableObject {
     private var previousRuntimeState: EngineRuntimeState = .idle
     private var activeLaunchSource: V2SaveStateStore.LaunchSource?
     var configureLaunch: ((EngineLaunchConfiguration) -> EngineLaunchConfiguration)?
+    var launchFullscreen = false
+    var onGameWindowDismissed: (() -> Void)?
+
+    private func presentLaunchedWindow(_ controller: HostWindowController) {
+        controller.presentWindow()
+        if launchFullscreen { controller.enterFullscreenIfNeeded() }
+    }
 
     func shutdown() {
         if let pakURL = lastLaunchedPakURL, shouldPersistResumeSession(for: activeLaunchSource) {
@@ -195,7 +202,7 @@ final class HostWindowCoordinator: ObservableObject {
                     liveSessionControllable = true
                     runtimeState = windowController.runtimeStateSnapshot
                     runtimeDiagnostics = windowController.runtimeDiagnosticsSnapshot
-                    windowController.presentWindow()
+                    presentLaunchedWindow(windowController)
                     DispatchQueue.main.async { [weak self] in self?.refreshSaveSlots() }
                     return
                 }
@@ -215,7 +222,7 @@ final class HostWindowCoordinator: ObservableObject {
                     liveSessionControllable = true
                     windowController.relaunch(with: launchConfiguration)
                     windowController.window?.center()
-                    windowController.presentWindow()
+                    presentLaunchedWindow(windowController)
                     return
                 }
 
@@ -231,7 +238,7 @@ final class HostWindowCoordinator: ObservableObject {
                 liveSessionControllable = true
                 windowController.showWindow(nil)
                 windowController.window?.center()
-                windowController.presentWindow()
+                presentLaunchedWindow(windowController)
                 return
             }
 
@@ -248,7 +255,7 @@ final class HostWindowCoordinator: ObservableObject {
                windowController.runtimeMode == runtimeMode,
                windowController.launchConfiguration == launchConfiguration {
                 windowController.showWindow(nil)
-                windowController.presentWindow()
+                presentLaunchedWindow(windowController)
                 return
             }
 
@@ -264,7 +271,7 @@ final class HostWindowCoordinator: ObservableObject {
             liveSessionControllable = runtimeMode == .process
             windowController.showWindow(nil)
             windowController.window?.center()
-            windowController.presentWindow()
+            presentLaunchedWindow(windowController)
         } catch {
             runtimeState = .failed(error.localizedDescription)
             runtimeDiagnostics.lastErrorMessage = error.localizedDescription
@@ -342,8 +349,12 @@ final class HostWindowCoordinator: ObservableObject {
         windowController.onSuspended = { [weak self] in
             guard let self else { return }
             defer {
-                self.presentPrimaryWindow()
                 self.refreshSaveSlots()
+                if let onGameWindowDismissed = self.onGameWindowDismissed {
+                    onGameWindowDismissed()
+                } else {
+                    self.presentPrimaryWindow()
+                }
             }
 
             guard let lastLaunchedPakURL else {
@@ -360,6 +371,9 @@ final class HostWindowCoordinator: ObservableObject {
             } catch {
                 self.runtimeDiagnostics.lastErrorMessage = error.localizedDescription
             }
+        }
+        windowController.onWindowDismissed = { [weak self] in
+            self?.onGameWindowDismissed?()
         }
         windowController.onQuickMenuCaptured = { [weak self] in
             self?.refreshSaveSlots()

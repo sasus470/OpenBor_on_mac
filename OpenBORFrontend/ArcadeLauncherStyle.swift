@@ -1,5 +1,32 @@
 import SwiftUI
 
+enum LauncherLibraryLayout: String, CaseIterable, Identifiable {
+    case sidebar
+    case grid
+    var id: String { rawValue }
+    var title: String { UIStrings.text(self == .sidebar ? "Sidebar list" : "Centered grid") }
+    var symbol: String { self == .sidebar ? "list.bullet" : "square.grid.2x2" }
+}
+
+struct ArcadeGameTitle: View {
+    let title: String
+    let size: CGFloat
+    let hovering: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 0.1, paused: !hovering || reduceMotion)) { timeline in
+            let pulse = hovering && !reduceMotion ? (sin(timeline.date.timeIntervalSinceReferenceDate * 5) + 1) / 2 : 0
+            Text(title)
+                .font(.custom("Menlo-Bold", size: size))
+                .foregroundStyle(hovering ? ArcadePalette.amber : ArcadePalette.cream)
+                .offset(x: pulse * 3)
+                .shadow(color: ArcadePalette.amber.opacity(hovering ? 0.25 + pulse * 0.4 : 0), radius: 3)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
 enum ArcadePalette {
     static let ink = Color(red: 0.094, green: 0.11, blue: 0.14)
     static let amber = Color(red: 0.98, green: 0.76, blue: 0.36)

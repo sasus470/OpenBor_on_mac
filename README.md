@@ -28,10 +28,11 @@ This project packages:
 - suspended live sessions, disk savestate slots and selectable shader presets
 - preview-based rewind with synchronized music and half-second checkpoints
 - fullscreen/windowed rewind layouts and optional animated launcher background
-- cover art system with:
-  - generated local covers
-  - manual cover import
-  - local SQLite cover database
+- selectable sidebar list or centered library grid, with animated game titles
+- configurable PAK library folder and optional fullscreen game launch
+- generated local covers, local file import and an embedded online cover-search browser
+- local SQLite cover cache; manually chosen covers are preserved
+- command-line game launches automatically quit the launcher when the game closes
 - support-ready structure for future frontend integrations such as ES-DE
 
 ## Build Requirements
@@ -77,6 +78,8 @@ build/frontend/OpenBOR Frontend Launcher.app
 
 The frontend launcher also supports command-line usage for integrations and advanced workflows.
 
+When a game is launched from the command line, closing its window also quits the launcher and shuts down the engine. Normal launches from the library keep the launcher open for resume or another game.
+
 Supported options:
 
 - `--pak <file>`
@@ -112,8 +115,8 @@ Built app packages such as:
 
 should be published through GitHub `Releases`, not committed into source control.
 
-Current validated launcher build: **V2.0, 20261002-1902**, macOS 14+ on Apple Silicon.
-See [release notes](docs/RELEASE_20261002.md). Historical development builds are
+Current launcher build: **V2.0, 20261003-1512**, macOS 14+ on Apple Silicon.
+See [release notes](docs/RELEASE_20261003.md). Historical development builds are
 archived separately and should not be confused with the current launcher.
 Games, user saves, logs and compilation caches are not distributed.
 

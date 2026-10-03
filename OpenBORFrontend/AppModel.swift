@@ -59,6 +59,7 @@ enum MetalShaderPreset: String, CaseIterable, Identifiable {
 private enum CoverSource: String {
     case generated
     case screenscraper
+    case manual
 }
 
 private struct ScreenScraperGameMatch {
@@ -186,12 +187,23 @@ final class AppModel: ObservableObject {
     let runtimeCoordinator = HostWindowCoordinator()
     private var runtimeObservation: AnyCancellable?
     private var terminationObserver: NSObjectProtocol?
+    private var engineTerminationObserver: NSObjectProtocol?
+    private var cliExitRequested = false
     private var didHandleStartup = false
     @Published var renderBackend = LauncherRenderBackend(rawValue: UserDefaults.standard.string(forKey: "launcher.renderBackend") ?? "") ?? .metal {
         didSet { UserDefaults.standard.set(renderBackend.rawValue, forKey: "launcher.renderBackend") }
     }
     @Published var animatedBackground = UserDefaults.standard.object(forKey: "launcher.animatedBackground") as? Bool ?? true {
         didSet { UserDefaults.standard.set(animatedBackground, forKey: "launcher.animatedBackground") }
+    }
+    @Published var launchFullscreen = UserDefaults.standard.bool(forKey: "launcher.launchFullscreen") {
+        didSet {
+            UserDefaults.standard.set(launchFullscreen, forKey: "launcher.launchFullscreen")
+            runtimeCoordinator.launchFullscreen = launchFullscreen
+        }
+    }
+    @Published var libraryLayout = LauncherLibraryLayout(rawValue: UserDefaults.standard.string(forKey: "launcher.libraryLayout") ?? "") ?? .sidebar {
+        didSet { UserDefaults.standard.set(libraryLayout.rawValue, forKey: "launcher.libraryLayout") }
     }
     private static let useMetalDefaultsKey = "video.useMetalRenderer"
     private static let metalShaderDefaultsKey = "video.metalShaderPreset"
@@ -200,6 +212,7 @@ final class AppModel: ObservableObject {
     @Published var selectedGameID: GameEntry.ID?
     @Published var statusText = "Ready"
     @Published var showingSettings = false
+    @Published var coverBrowserGame: GameEntry?
     @Published var searchText = ""
     @Published private(set) var coverURLs: [String: URL] = [:]
     @Published private(set) var coverRefreshTokens: [String: UUID] = [:]
@@ -222,7 +235,9 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(screenScraperUserPassword, forKey: "ss.userPassword") }
     }
     
-    let pakDirectory: URL
+    @Published private(set) var pakDirectory: URL
+    @Published private(set) var usesDefaultPakDirectory: Bool
+    let defaultPakDirectory: URL
     let savesDirectory: URL
     let logsDirectory: URL
     let screenshotsDirectory: URL
@@ -253,7 +268,10 @@ final class AppModel: ObservableObject {
         ])
         let startupRequest = AppModel.parseStartupArguments()
         self.startupRequest = startupRequest
-        pakDirectory = startupRequest.pakDirectoryOverride ?? base.appendingPathComponent("Paks", isDirectory: true)
+        defaultPakDirectory = base.appendingPathComponent("Paks", isDirectory: true)
+        let savedPakDirectory = UserDefaults.standard.string(forKey: "launcher.pakDirectory").map { URL(fileURLWithPath: $0, isDirectory: true) }
+        pakDirectory = startupRequest.pakDirectoryOverride ?? savedPakDirectory ?? defaultPakDirectory
+        usesDefaultPakDirectory = startupRequest.pakDirectoryOverride == nil && savedPakDirectory == nil
         savesDirectory = startupRequest.savesDirectoryOverride ?? base.appendingPathComponent("Saves", isDirectory: true)
         logsDirectory = startupRequest.logsDirectoryOverride ?? base.appendingPathComponent("Logs", isDirectory: true)
         screenshotsDirectory = startupRequest.screenshotsDirectoryOverride ?? base.appendingPathComponent("ScreenShots", isDirectory: true)
@@ -275,6 +293,12 @@ final class AppModel: ObservableObject {
         importSeedPaksIfNeeded()
         reloadGames()
         runtimeCoordinator.runtimeMode = .process
+        runtimeCoordinator.launchFullscreen = launchFullscreen
+        if isLaunchOnlyMode {
+            runtimeCoordinator.onGameWindowDismissed = { [weak self] in
+                self?.finishCommandLineLaunch()
+            }
+        }
         runtimeCoordinator.configureLaunch = { [weak self] configuration in
             guard let self else { return configuration }
             var result = configuration
@@ -294,6 +318,9 @@ final class AppModel: ObservableObject {
     
     deinit {
         if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
+        if let engineTerminationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(engineTerminationObserver)
+        }
         if let coverDatabase {
             sqlite3_close(coverDatabase)
         }
@@ -340,6 +367,29 @@ final class AppModel: ObservableObject {
         guard !startupEngineArguments.isEmpty else { return }
         launch(engineArguments: startupEngineArguments)
     }
+
+    private func finishCommandLineLaunch() {
+        guard isLaunchOnlyMode, !cliExitRequested else { return }
+        cliExitRequested = true
+        // Leave the close/suspend callback before shutdown tears down the runtime.
+        DispatchQueue.main.async {
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func observeCommandLineEngine(_ application: NSRunningApplication) {
+        guard isLaunchOnlyMode else { return }
+        let pid = application.processIdentifier
+        engineTerminationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let stopped = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  stopped.processIdentifier == pid else { return }
+            MainActor.assumeIsolated { self?.finishCommandLineLaunch() }
+        }
+        // Cover a short-lived engine exiting before its launch callback is delivered.
+        if application.isTerminated { finishCommandLineLaunch() }
+    }
     
     func reloadGames() {
         let fm = FileManager.default
@@ -348,13 +398,15 @@ final class AppModel: ObservableObject {
             includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
         )) ?? []
-        let testingLibrary = V2LaunchConfigurationFactory.appSupportRootURL().appendingPathComponent("Paks", isDirectory: true)
-        let testingPaks = (try? fm.contentsOfDirectory(at: testingLibrary, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? []
-        let existingNames = Set(urls.map(\.lastPathComponent))
-        urls.append(contentsOf: testingPaks.filter { !existingNames.contains($0.lastPathComponent) })
+        if usesDefaultPakDirectory {
+            let testingLibrary = V2LaunchConfigurationFactory.appSupportRootURL().appendingPathComponent("Paks", isDirectory: true)
+            let testingPaks = (try? fm.contentsOfDirectory(at: testingLibrary, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? []
+            let existingNames = Set(urls.map(\.lastPathComponent))
+            urls.append(contentsOf: testingPaks.filter { !existingNames.contains($0.lastPathComponent) })
+        }
         
         games = urls
-            .filter { $0.pathExtension.lowercased() == "pak" }
+            .filter { $0.pathExtension.lowercased() == "pak" && (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
             .map { url in
                 let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
                 let modified = values?.contentModificationDate ?? .distantPast
@@ -430,6 +482,50 @@ final class AppModel: ObservableObject {
     func openPaksFolder() {
         NSWorkspace.shared.open(pakDirectory)
     }
+
+    func choosePaksFolder() {
+        let panel = NSOpenPanel()
+        panel.title = UIStrings.text("Choose PAK folder")
+        panel.message = UIStrings.text("PAK folder help")
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = pakDirectory
+        guard panel.runModal() == .OK, let directory = panel.url else { return }
+        setPaksFolder(directory)
+    }
+
+    @discardableResult
+    func setPaksFolder(_ directory: URL) -> Bool {
+        let directory = directory.standardizedFileURL
+        do {
+            guard try directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
+                statusText = UIStrings.text("PAK folder unavailable")
+                return false
+            }
+            _ = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        } catch {
+            statusText = UIStrings.text("PAK folder unavailable")
+            return false
+        }
+        pakDirectory = directory
+        usesDefaultPakDirectory = false
+        UserDefaults.standard.set(directory.path, forKey: "launcher.pakDirectory")
+        searchText = ""
+        reloadGames()
+        runtimeCoordinator.selectedPakURL = selectedGame?.pakURL
+        return true
+    }
+
+    func resetPaksFolder() {
+        pakDirectory = defaultPakDirectory
+        usesDefaultPakDirectory = true
+        UserDefaults.standard.removeObject(forKey: "launcher.pakDirectory")
+        try? FileManager.default.createDirectory(at: defaultPakDirectory, withIntermediateDirectories: true)
+        searchText = ""
+        reloadGames()
+        runtimeCoordinator.selectedPakURL = selectedGame?.pakURL
+    }
     
     func openSavesFolder() {
         NSWorkspace.shared.open(savesDirectory)
@@ -460,21 +556,21 @@ final class AppModel: ObservableObject {
             return
         }
         
-        let destinationURL = coversDirectory.appendingPathComponent(coverFileName(for: game))
-        
         do {
-            if FileManager.default.fileExists(atPath: destinationURL.path) {
-                try FileManager.default.removeItem(at: destinationURL)
-            }
-            try FileManager.default.copyItem(at: selectedURL, to: destinationURL)
-            saveCoverRecord(for: game, coverURL: destinationURL, source: "manual")
-            coverURLs[game.id] = destinationURL
-            coverRefreshTokens[game.id] = UUID()
-            statusText = UIStrings.text("Cover imported", game.title)
+            try storeCoverData(Data(contentsOf: selectedURL), for: game)
         } catch {
-            NSSound.beep()
-            statusText = "Import cover failed: \(error.localizedDescription)"
+            statusText = UIStrings.text("Cover import failed") + " " + error.localizedDescription
         }
+    }
+
+    func storeCoverData(_ data: Data, for game: GameEntry) throws {
+        let png = try CoverImageLoader.normalizedPNG(data)
+        let destinationURL = coversDirectory.appendingPathComponent(coverFileName(for: game))
+        try png.write(to: destinationURL, options: .atomic)
+        saveCoverRecord(for: game, coverURL: destinationURL, source: "manual")
+        coverURLs[game.id] = destinationURL
+        coverRefreshTokens[game.id] = UUID()
+        statusText = UIStrings.text("Cover imported", game.title)
     }
     
     private func launch(pakURL: URL) {
@@ -515,13 +611,14 @@ final class AppModel: ObservableObject {
         } else {
             statusText = "Launching OpenBOR..."
         }
-        NSWorkspace.shared.openApplication(at: engineApp, configuration: config) { _, error in
+        NSWorkspace.shared.openApplication(at: engineApp, configuration: config) { application, error in
             Task { @MainActor in
                 if let error {
                     self.statusText = "Launch failed: \(error.localizedDescription)"
                     NSSound.beep()
                 } else {
                     self.statusText = "OpenBOR running"
+                    if let application { self.observeCommandLineEngine(application) }
                 }
             }
         }
@@ -529,13 +626,14 @@ final class AppModel: ObservableObject {
     
     private func ensureDirectories() {
         let fm = FileManager.default
-        for dir in [pakDirectory, savesDirectory, logsDirectory, screenshotsDirectory, coversDirectory] {
+        let directories = [savesDirectory, logsDirectory, screenshotsDirectory, coversDirectory] + (usesDefaultPakDirectory ? [pakDirectory] : [])
+        for dir in directories {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
     }
     
     private func importSeedPaksIfNeeded() {
-        guard games.isEmpty else { return }
+        guard games.isEmpty, usesDefaultPakDirectory else { return }
         guard let seedDir = Bundle.main.resourceURL?.appendingPathComponent("SeedPaks", isDirectory: true) else { return }
         let fm = FileManager.default
         guard let urls = try? fm.contentsOfDirectory(at: seedDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return }
@@ -649,6 +747,8 @@ final class AppModel: ObservableObject {
     static func printCLIHelp() {
         let help = """
         OpenBOR Frontend Launcher CLI
+
+        When launched with a game, closing the game also exits the launcher.
         
         Options:
           --pak <file>              Launch a specific .pak
@@ -692,7 +792,7 @@ final class AppModel: ObservableObject {
             if let existing = existingCoverURL(for: game), FileManager.default.fileExists(atPath: existing.path) {
                 updated[game.id] = existing
                 coverRefreshTokens[game.id] = UUID()
-                if coverSource(for: game) != .screenscraper {
+                if coverSource(for: game) == .generated {
                     queueScreenScraperFetchIfPossible(for: game)
                 }
                 continue

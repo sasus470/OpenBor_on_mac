@@ -41,6 +41,7 @@ xcrun swiftc \
   -O \
   -module-name OpenBORFrontend \
   -framework SwiftUI \
+  -framework WebKit \
   -framework AppKit \
   -framework GameController \
   -framework Metal \
@@ -54,6 +55,7 @@ xcrun swiftc \
   "$FRONTEND_DIR/OpenBORFrontendApp.swift" \
   "$FRONTEND_DIR/LauncherSessionView.swift" \
   "$FRONTEND_DIR/ArcadeLauncherStyle.swift" \
+  "$FRONTEND_DIR/CoverBrowserView.swift" \
   "$ROOT_DIR"/OpenBORMacV2/Host/*.swift \
   "$ROOT_DIR"/OpenBORMacV2/Renderer/*.swift \
   "$ROOT_DIR"/OpenBORMacV2/EngineBridge/*.swift \

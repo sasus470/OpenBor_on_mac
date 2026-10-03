@@ -115,7 +115,12 @@ void borExit(int reset)
 	chdir("/usr/gp2x");
 	execl("/usr/gp2x/gp2xmenu", "/usr/gp2x/gp2xmenu", NULL);
 #elif SDL
-	SDL_Delay(1000);
+	// Hosted sessions have no standalone exit screen that needs this delay.
+	const char *hosted = getenv("OPENBOR_V2_HOSTED");
+	if(!hosted || strcmp(hosted, "1") != 0)
+	{
+		SDL_Delay(1000);
+	}
 	SDL_Quit(); // call this instead of atexit(SDL_Quit); It's best practice!
 #endif
 

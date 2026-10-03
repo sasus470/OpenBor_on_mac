@@ -163,6 +163,7 @@ final class ProcessOpenBORRuntime: EngineRuntime {
 
     func stop() {
         state = .stopping
+        let wasSuspended = isSuspended
         isSuspended = false
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
@@ -171,6 +172,11 @@ final class ProcessOpenBORRuntime: EngineRuntime {
             process.terminationHandler = nil
 
             if process.isRunning {
+                // A suspended engine pumps SDL events but cannot consume SDL_QUIT.
+                // Wake it so SIGTERM can run the normal save/cleanup path.
+                if wasSuspended {
+                    kill(process.processIdentifier, SIGUSR2)
+                }
                 process.terminate()
 
                 for _ in 0..<40 where process.isRunning {

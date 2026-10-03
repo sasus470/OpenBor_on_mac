@@ -37,8 +37,10 @@ final class HostWindowController: NSWindowController, NSWindowDelegate {
     private(set) var suspendedPakURL: URL?
     private var pendingSuspendForResume = false
     private var focusLiveStateOnFirstFrame = false
+    private var fullscreenEntryPending = false
     var onSuspendRequested: ((URL?) -> Void)?
     var onSuspended: (() -> Void)?
+    var onWindowDismissed: (() -> Void)?
     var onQuickMenuLoadRequested: ((String) throws -> Void)?
     var onQuickMenuCaptured: (() -> Void)?
     private let quickMenu = QuickMenuModel()
@@ -119,6 +121,19 @@ final class HostWindowController: NSWindowController, NSWindowDelegate {
 
     func toggleFullscreen() {
         window?.toggleFullScreen(nil)
+    }
+
+    func enterFullscreenIfNeeded() {
+        guard let window, !window.styleMask.contains(.fullScreen), !fullscreenEntryPending else { return }
+        fullscreenEntryPending = true
+        // Enter after the launch has finished presenting and centering the host window.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.fullscreenEntryPending = false
+            guard let window = self.window, window.isVisible,
+                  !self.hasShutDownRuntime, !window.styleMask.contains(.fullScreen) else { return }
+            window.toggleFullScreen(nil)
+        }
     }
 
     func captureLiveSaveState() throws -> EngineLiveSaveStateArtifact {
@@ -251,7 +266,9 @@ final class HostWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        let wasActive = !hasShutDownRuntime
         shutdownRuntime()
+        if wasActive { onWindowDismissed?() }
     }
 
     func windowWillEnterFullScreen(_ notification: Notification) {
